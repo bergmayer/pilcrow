@@ -16,18 +16,15 @@ name: "All text-editing tasks — single launch, every command"
 - inputText: "clip-A"
 - assertVisible:
     text: "(?s).*clip-A.*"
-    optional: true
 # ⌘X cut
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runScript: { file: lib/shortcut.js, env: { KEY: "x", MODS: "cmd" } }
 - assertNotVisible:
     text: "(?s).*clip-A.*"
-    optional: true
 # ⌘V paste
 - runScript: { file: lib/shortcut.js, env: { KEY: "v", MODS: "cmd" } }
 - assertVisible:
     text: "(?s).*clip-A.*"
-    optional: true
 # Duplicate via ⌘A ⌘C → → ⌘V
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runScript: { file: lib/shortcut.js, env: { KEY: "c", MODS: "cmd" } }
@@ -35,17 +32,14 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "v", MODS: "cmd" } }
 - assertVisible:
     text: "(?s).*clip-Aclip-A.*"
-    optional: true
 # Undo
 - runScript: { file: lib/shortcut.js, env: { KEY: "z", MODS: "cmd" } }
 - assertNotVisible:
     text: "(?s).*clip-Aclip-A.*"
-    optional: true
 # Redo
 - runScript: { file: lib/shortcut.js, env: { KEY: "z", MODS: "cmd,shift" } }
 - assertVisible:
     text: "(?s).*clip-Aclip-A.*"
-    optional: true
 
 # ──────────────────────────── §02 Selection ────────────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -55,7 +49,6 @@ name: "All text-editing tasks — single launch, every command"
 - inputText: "REPLACED"
 - assertVisible:
     text: "(?s).*REPLACED.*"
-    optional: true
 # Select Line
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Select Line" } }
 - runScript: { file: lib/shortcut.js, env: { KEY: "x", MODS: "cmd" } }
@@ -64,7 +57,6 @@ name: "All text-editing tasks — single launch, every command"
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Smart Move to Line Start" } }
 - assertVisible:
     text: "(?s).*smart-home.*"
-    optional: true
 
 # ─────────────────────────── §03 Line operations ───────────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -81,17 +73,14 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "k", MODS: "cmd,shift" } }
 - assertVisible:
     text: "(?s).*AAA.*"
-    optional: true
 - assertVisible:
     text: "(?s).*BBB.*"
-    optional: true
 # Transpose
 - runFlow: lib/clear_buffer.yaml
 - inputText: "ab"
 - runScript: { file: lib/shortcut.js, env: { KEY: "t", MODS: "control" } }
 - assertVisible:
     text: "(?s).*ba.*"
-    optional: true
 # Join lines (⌃J)
 - runFlow: lib/clear_buffer.yaml
 - inputText: "left"
@@ -101,24 +90,20 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "j", MODS: "control" } }
 - assertVisible:
     text: "(?s).*left right.*"
-    optional: true
 # Delete word backward / forward / EOL
 - runFlow: lib/clear_buffer.yaml
 - inputText: "word-one word-two"
 - runScript: { file: lib/shortcut.js, env: { KEY: "delete", MODS: "option" } }
 - assertNotVisible:
     text: "(?s).*word-two.*"
-    optional: true
 - assertVisible:
     text: "(?s).*word-one.*"
-    optional: true
 - runFlow: lib/clear_buffer.yaml
 - inputText: "alpha bravo"
 - runScript: { file: lib/shortcut.js, env: { KEY: "up", MODS: "cmd" } }
 - runScript: { file: lib/shortcut.js, env: { KEY: "forwarddelete", MODS: "option" } }
 - assertNotVisible:
     text: "(?s).*alpha.*"
-    optional: true
 
 # ─────────────────────── §04 Indent / Outdent / Comment ───────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -127,16 +112,13 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "]", MODS: "cmd" } }
 - assertVisible:
     text: "(?s).*indent-line.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runScript: { file: lib/shortcut.js, env: { KEY: "[", MODS: "cmd" } }
 - assertVisible:
     text: "(?s).*indent-line.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "/", MODS: "cmd" } }
 - assertVisible:
     text: "(?s).*indent-line.*"
-    optional: true
 
 # ──────────────────── §05 Case conversion (palette) ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -145,42 +127,34 @@ name: "All text-editing tasks — single launch, every command"
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "UPPERCASE" } }
 - assertVisible:
     text: "(?s).*HELLO WORLD.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "lowercase" } }
 - assertVisible:
     text: "(?s).*hello world.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Capitalized" } }
 - assertVisible:
     text: "(?s).*Hello World.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Title Case" } }
 - assertVisible:
     text: "(?s).*Hello World.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "snake_case" } }
 - assertVisible:
     text: "(?s).*hello_world.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "camelCase" } }
 - assertVisible:
     text: "(?s).*helloWorld.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "PascalCase" } }
 - assertVisible:
     text: "(?s).*HelloWorld.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "kebab-case" } }
 - assertVisible:
     text: "(?s).*hello-world.*"
-    optional: true
 
 # ──────────────────── §06 URL / Base64 encode-decode ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -189,19 +163,16 @@ name: "All text-editing tasks — single launch, every command"
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "URL Encode" } }
 - assertVisible:
     text: "(?s).*a%20b%2Fc.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "URL Decode" } }
 - assertVisible:
     text: "(?s).*a b/c.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Base64 Encode" } }
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Base64 Decode" } }
 - assertVisible:
     text: "(?s).*a b/c.*"
-    optional: true
 
 # ──────────────────── §07 Text transforms (palette) ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -210,14 +181,12 @@ name: "All text-editing tasks — single launch, every command"
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Reverse Selection" } }
 - assertVisible:
     text: "(?s).*dcba.*"
-    optional: true
 - runFlow: lib/clear_buffer.yaml
 - inputText: "trim-me   "
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Trim Trailing Whitespace" } }
 - assertVisible:
     text: "(?s).*trim-me.*"
-    optional: true
 
 # ──────────────────── §08 Sort / Reverse / Unique ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -235,21 +204,16 @@ name: "All text-editing tasks — single launch, every command"
     timeout: 800
 - assertVisible:
     text: "(?s).*alpha.*"
-    optional: true
 - assertVisible:
     text: "(?s).*bravo.*"
-    optional: true
 - assertVisible:
     text: "(?s).*charlie.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Reverse Lines" } }
 - assertVisible:
     text: "(?s).*alpha.*"
-    optional: true
 - assertVisible:
     text: "(?s).*charlie.*"
-    optional: true
 - runFlow: lib/clear_buffer.yaml
 - inputText: "x"
 - pressKey: Enter
@@ -260,10 +224,8 @@ name: "All text-editing tasks — single launch, every command"
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Unique Lines" } }
 - assertVisible:
     text: "(?s).*x.*"
-    optional: true
 - assertVisible:
     text: "(?s).*y.*"
-    optional: true
 
 # ──────────────────── §09 Code folding ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -287,19 +249,15 @@ name: "All text-editing tasks — single launch, every command"
     timeout: 800
 - assertVisible:
     text: "(?s).*body-of-H1.*"
-    optional: true
 - assertVisible:
     text: "(?s).*body-of-H2.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "[", MODS: "cmd,option" } }
 - waitForAnimationToEnd:
     timeout: 800
 - assertVisible:
     text: "(?s).*H1 One.*"
-    optional: true
 - assertVisible:
     text: "(?s).*H2 Two.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "]", MODS: "cmd,option" } }
 - waitForAnimationToEnd:
     timeout: 800
@@ -328,7 +286,6 @@ name: "All text-editing tasks — single launch, every command"
     timeout: 600
 - assertVisible:
     text: "(?s).*needle.*"
-    optional: true
 - runFlow: lib/clear_buffer.yaml
 - inputText: "(a + b)"
 - runScript: { file: lib/shortcut.js, env: { KEY: "left", MODS: "" } }
@@ -343,7 +300,6 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "0", MODS: "cmd" } }
 - assertVisible:
     text: "(?s).*view-sentinel.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "l", MODS: "cmd,shift" } }
 - waitForAnimationToEnd:
     timeout: 400
@@ -358,7 +314,6 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "i", MODS: "cmd,shift" } }
 - assertVisible:
     text: "(?s).*view-sentinel.*"
-    optional: true
 
 # ──────────────────── §12 Insert helpers ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -366,17 +321,14 @@ name: "All text-editing tasks — single launch, every command"
 - inputText: "after-tab"
 - assertVisible:
     text: "(?s).*after-tab.*"
-    optional: true
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Insert Newline" } }
 - inputText: "next-line"
 - assertVisible:
     text: "(?s).*next-line.*"
-    optional: true
 - runFlow: lib/clear_buffer.yaml
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Insert Date" } }
 - assertVisible:
     text: "(?s).*2026.*"
-    optional: true
 
 # ──────────────────── §13 Bookmarks ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -389,7 +341,6 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "1", MODS: "option" } }
 - assertVisible:
     text: "(?s).*bookmark-line-A.*"
-    optional: true
 
 # ──────────────────── §14 Unicode normalization (palette) ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -398,22 +349,18 @@ name: "All text-editing tasks — single launch, every command"
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Normalize NFC" } }
 - assertVisible:
     text: "(?s).*cafe.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Normalize NFD" } }
 - assertVisible:
     text: "(?s).*cafe.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Normalize NFKC" } }
 - assertVisible:
     text: "(?s).*cafe.*"
-    optional: true
 - runScript: { file: lib/shortcut.js, env: { KEY: "a", MODS: "cmd" } }
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Normalize NFKD" } }
 - assertVisible:
     text: "(?s).*cafe.*"
-    optional: true
 
 # ──────────────────── §15 Insert palette commands ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -422,14 +369,12 @@ name: "All text-editing tasks — single launch, every command"
     timeout: 600
 - assertVisible:
     text: "(?s).*:.*"
-    optional: true
 - runFlow: lib/clear_buffer.yaml
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Insert Date & Time" } }
 - waitForAnimationToEnd:
     timeout: 600
 - assertVisible:
     text: "(?s).*2026.*"
-    optional: true
 
 # ──────────────────── §16 Delete to End of Line (⌃K) ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -441,10 +386,8 @@ name: "All text-editing tasks — single launch, every command"
 - runScript: { file: lib/shortcut.js, env: { KEY: "k", MODS: "control" } }
 - assertVisible:
     text: "(?s).*keep.*"
-    optional: true
 - assertNotVisible:
     text: "(?s).*drop.*"
-    optional: true
 
 # ──────────────────── §17 Find Next / Prev / Use Selection / Jump ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -514,7 +457,6 @@ name: "All text-editing tasks — single launch, every command"
     timeout: 400
 - assertVisible:
     text: "(?s).*bk-A.*"
-    optional: true
 
 # ──────────────────── §20 Set Line Endings via palette ────────────────────
 - runFlow: lib/clear_buffer.yaml
@@ -527,7 +469,6 @@ name: "All text-editing tasks — single launch, every command"
     timeout: 600
 - assertVisible:
     text: "(?s).*line-endings-test.*"
-    optional: true
 
 # ──────────────────── §21 Set Syntax Language via palette ────────────────────
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Set Syntax: Swift" } }
@@ -535,13 +476,11 @@ name: "All text-editing tasks — single launch, every command"
     timeout: 600
 - assertVisible:
     text: "(?s).*Swift.*"
-    optional: true
 - runFlow: { file: lib/run_command.yaml, env: { COMMAND: "Set Syntax: Markdown" } }
 - waitForAnimationToEnd:
     timeout: 600
 - assertVisible:
     text: "(?s).*Markdown.*"
-    optional: true
 
 # ──────────────────── §22 Sheets open + dismiss (Preferences, Command Palette, file pickers) ────────────────────
 # Preferences ⌘,
@@ -555,4 +494,3 @@ name: "All text-editing tasks — single launch, every command"
     point: "50%,55%"
 - assertVisible:
     text: "(?s).*Markdown.*"
-    optional: true

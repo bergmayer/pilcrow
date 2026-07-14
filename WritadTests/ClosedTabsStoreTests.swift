@@ -7,18 +7,24 @@ final class ClosedTabsStoreTests: XCTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
     private var store: ClosedTabsStore!
+    private var storageDirectory: URL!
 
     override func setUp() async throws {
         try await super.setUp()
         suiteName = "writad-closed-tabs-test-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
-        store = ClosedTabsStore(defaults: defaults)
+        storageDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("writad-closed-tabs-\(UUID().uuidString)", isDirectory: true)
+        store = ClosedTabsStore(defaults: defaults, storageDirectory: storageDirectory)
     }
 
     override func tearDown() async throws {
+        store.clear()
         defaults.removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: storageDirectory)
         store = nil
+        storageDirectory = nil
         defaults = nil
         suiteName = nil
         try await super.tearDown()
@@ -77,7 +83,7 @@ final class ClosedTabsStoreTests: XCTestCase {
     func test_persistence_recordsSurviveAcrossInstances() {
         store.record(makeRecord(displayName: "alpha"))
         store.record(makeRecord(displayName: "beta"))
-        let fresh = ClosedTabsStore(defaults: defaults)
+        let fresh = ClosedTabsStore(defaults: defaults, storageDirectory: storageDirectory)
         XCTAssertEqual(fresh.records.map(\.displayName), ["beta", "alpha"])
     }
 
@@ -86,7 +92,7 @@ final class ClosedTabsStoreTests: XCTestCase {
         store.record(target)
         store.record(makeRecord(displayName: "other"))
         store.remove(target.id)
-        let fresh = ClosedTabsStore(defaults: defaults)
+        let fresh = ClosedTabsStore(defaults: defaults, storageDirectory: storageDirectory)
         XCTAssertEqual(fresh.records.map(\.displayName), ["other"])
     }
 
@@ -101,6 +107,35 @@ final class ClosedTabsStoreTests: XCTestCase {
         XCTAssertTrue(untitled.isUnsavedScratch)
         XCTAssertFalse(untitledEmpty.isUnsavedScratch)
         XCTAssertFalse(savedFile.isUnsavedScratch)
+    }
+
+    func test_record_externalizesSnapshotAndKeepsDefaultsSmall() async throws {
+        let body = String(repeating: "abcdefghij", count: 20_000)
+        store.record(ClosedTabRecord(
+            displayName: "large untitled",
+            fileURL: nil,
+            unsavedSnapshot: body
+        ))
+
+        let record = try XCTUnwrap(store.records.first)
+        XCTAssertNotNil(record.snapshotFilename)
+        let persistedMetadata = try XCTUnwrap(
+            defaults.data(forKey: AppPreferenceKey.closedTabRecords)
+        )
+        XCTAssertLessThan(persistedMetadata.count, 4_096)
+        let restored = try await store.loadSnapshot(record)
+        XCTAssertEqual(restored, body)
+    }
+
+    func test_remove_deletesExternalSnapshot() throws {
+        store.record(makeRecord(displayName: "temporary"))
+        let record = try XCTUnwrap(store.records.first)
+        let filename = try XCTUnwrap(record.snapshotFilename)
+        let payload = storageDirectory.appendingPathComponent(filename)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: payload.path))
+
+        store.remove(record.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: payload.path))
     }
 
     // MARK: - Helpers

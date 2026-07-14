@@ -263,3 +263,89 @@ enum MarkdownListContinuation {
         return nil
     }
 }
+
+// MARK: - Document opening
+
+/// One canonical file-open pipeline for every surface that produces a URL
+/// (Files browser, Open Recent, closed-tab restore, external open, and the
+/// scene-local importer). Keeping the state mirroring here prevents one
+/// entry point from forgetting encoding, large-file, revision-baseline, or
+/// error handling work performed by another.
+@MainActor
+enum DocumentWorkflow {
+
+    static func open(
+        _ url: URL,
+        in tab: TabModel,
+        goToLine: Int? = nil,
+        completion: (@MainActor (Result<Void, any Error>) -> Void)? = nil
+    ) {
+        let state = tab.state
+        let document = tab.document
+        let hadRenderableContent = document.fileURL != nil || !document.text.isEmpty
+
+        tab.kind = .editor
+        state.loadTask?.cancel()
+        state.loadGeneration &+= 1
+        let generation = state.loadGeneration
+        state.loadTask = Task { @MainActor [weak tab] in
+            guard let tab else { return }
+            let state = tab.state
+            let document = tab.document
+            defer {
+                if state.loadGeneration == generation {
+                    state.loadTask = nil
+                }
+            }
+            do {
+                try await document.loadAsync(from: url)
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                return
+            } catch {
+                if !hadRenderableContent {
+                    tab.kind = .launcher
+                    document.fileURL = nil
+                    state.fileURL = nil
+                }
+                AppStateBus.shared.presentation.openErrorMessage =
+                    "Couldn't open \(url.lastPathComponent): \(error.localizedDescription)"
+                completion?(.failure(error))
+                return
+            }
+
+            applyLoadedDocument(document, at: url, to: state)
+            RecentFilesStore.shared.record(url)
+
+            let persisted = FoldPersistence.ranges(for: url)
+            if !persisted.isEmpty {
+                DispatchQueue.main.async { [weak state] in
+                    state?.textView?.applyFoldRanges(persisted)
+                }
+            }
+            if let goToLine {
+                DispatchQueue.main.async { [weak state] in
+                    state?.textView?.goToLine(goToLine)
+                }
+            }
+            completion?(.success(()))
+        }
+    }
+
+    static func applyLoadedDocument(
+        _ document: PlainTextDocument,
+        at url: URL,
+        to state: EditorState
+    ) {
+        state.fileURL = url
+        let limit = SyntaxLimit.current()
+        let byteCount = document.originalData?.count ?? document.text.utf8.count
+        state.isLargeFile = !limit.allows(byteCount: byteCount)
+        state.languageIdentifier = LanguageRegistry.identifier(for: url)
+        state.text = document.text
+        state.savedBaselineText = document.text
+        state.fileEncoding = document.fileEncoding
+        state.lineEnding = document.lineEnding
+        state.requestEditorFocus()
+    }
+}

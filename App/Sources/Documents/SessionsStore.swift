@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import FileEncoding
 
 /// One tab's restorable state. Bookmark, not raw URL — File Provider
 /// locations (Nextcloud, iCloud) need explicit scope to re-open after
@@ -100,22 +101,13 @@ final class SessionsStore {
                       let scene = note.object as? UIScene
                 else { continue }
                 let key = ObjectIdentifier(scene)
-                if let sceneUUID = self.sceneUUIDsByObjectIdentifier.removeValue(forKey: key) {
-                    self.remove(forScene: sceneUUID)
-                }
-                // Tell iPadOS to fully discard the session, not just
-                // disconnect it. Without this, every closed window
-                // accumulates in `UIApplication.shared.openSessions`
-                // and shows up in iPadOS's "N hidden windows" toast
-                // on next launch. Drafts were already flushed by
-                // `scenePhase` → `.background` and `.onDisappear`,
-                // so there's no data loss — the launcher's Drafts
-                // section is our recently-closed UI.
-                UIApplication.shared.requestSceneSessionDestruction(
-                    scene.session,
-                    options: nil,
-                    errorHandler: nil
-                )
+                // A disconnect is not necessarily a user close: UIKit
+                // may purge a scene object under memory pressure while
+                // preserving its UISceneSession for reconnection. Drop
+                // only the live object mapping here. Explicit in-app
+                // closes and didDiscardSceneSessions are the permanent
+                // removal signals and clear the persisted record.
+                self.sceneUUIDsByObjectIdentifier.removeValue(forKey: key)
             }
         }
     }
@@ -194,6 +186,12 @@ final class SessionsStore {
             if let scene = session.scene, liveScenes.contains(ObjectIdentifier(scene)) {
                 continue
             }
+            // A persisted record means this disconnected session is
+            // intentionally restorable (for example after memory
+            // reclamation). Only purge truly unowned system sessions.
+            if hasRecord(forPersistentIdentifier: session.persistentIdentifier) {
+                continue
+            }
             app.requestSceneSessionDestruction(session, options: nil, errorHandler: nil)
         }
     }
@@ -219,8 +217,8 @@ final class SessionsStore {
     /// Used by `applySessionRestoreIfNeeded` to re-open windows
     /// that were alive at the prior involuntary kill (OOM, reboot).
     /// User-initiated closes remove their records before this point
-    /// either via the `didDisconnectNotification` handler (in-app
-    /// close) or `didDiscardSceneSessions` (App Switcher swipe), so
+    /// either via the explicit Close Window path (in-app close) or
+    /// `didDiscardSceneSessions` (App Switcher swipe), so
     /// only "the user didn't mean to lose this" records survive.
     private func recordsFromPreviousLaunch() -> [SessionRecord] {
         let priorRecords = records.filter { $0.launchID != currentLaunchID }
@@ -332,91 +330,152 @@ enum SessionRestore {
     /// caller should treat the tab as a fresh launcher slot.
     @discardableResult
     private static func populate(_ tab: TabModel, from snapshot: TabSnapshot) -> Bool {
-        // Read draft bytes first — used as the dirty buffer when the
-        // tab was unsaved at last quit, on top of disk content for
-        // URL-backed dirty tabs.
-        var draftText: String?
-        if let draftFilename = snapshot.draftFilename {
-            // Probe every read root, not just the current write root —
-            // if the iCloud sync toggle flipped between runs the draft
-            // lives under the other root.
-            for dir in DraftsStore.shared.readDirectories {
-                let candidate = dir.appendingPathComponent(draftFilename)
-                draftText = (try? String(contentsOf: candidate, encoding: .utf8))
-                    ?? (try? String(contentsOf: candidate, encoding: .isoLatin1))
-                if draftText != nil {
-                    tab.document.draftURL = candidate
-                    break
-                }
-            }
-            if tab.document.draftURL == nil {
-                // Not found anywhere — keep the snapshot's filename so
-                // future autosaves still overwrite the same entry.
-                tab.document.draftURL = DraftsStore.shared.directory
-                    .appendingPathComponent(draftFilename)
-            }
+        let draftURL = snapshot.draftFilename.flatMap { filename in
+            DraftsStore.shared.readDirectories
+                .map { $0.appendingPathComponent(filename) }
+                .first { FileManager.default.fileExists(atPath: $0.path) }
         }
+        let draftMetadata = draftURL.flatMap(DraftsStore.metadata(at:))
+        let resolvedSource = snapshot.fileBookmark.flatMap(resolveBookmark)
+        guard draftURL != nil || resolvedSource != nil else { return false }
 
-        if let bookmark = snapshot.fileBookmark, let resolved = resolveBookmark(bookmark) {
-            tab.document.fileURL = resolved.url
-            tab.state.fileURL = resolved.url
-            tab.state.languageIdentifier = LanguageRegistry.identifier(for: resolved.url)
-            // Show the draft (if any) immediately so the engine has
-            // bytes to paint while the disk load resolves.
-            if let draftText {
-                tab.document.text = draftText
-                tab.document.isDirty = true
-                tab.state.text = draftText
+        let state = tab.state
+        let document = tab.document
+        let seedRevision = document.bufferRevision
+        state.loadTask?.cancel()
+        state.loadGeneration &+= 1
+        let generation = state.loadGeneration
+        document.isLoading = true
+        state.loadTask = Task { @MainActor [weak tab] in
+            guard let tab else { return }
+            let state = tab.state
+            let document = tab.document
+            defer {
+                if state.loadGeneration == generation {
+                    state.loadTask = nil
+                    document.isLoading = false
+                }
             }
-            // Keystrokes bump bufferRevision; capture it now so the
-            // post-load re-apply can tell whether the user typed while
-            // the disk read was in flight.
-            let seedRevision = tab.document.bufferRevision
-            tab.state.loadTask = Task { @MainActor [weak tab] in
-                guard let tab else { return }
-                defer { tab.state.loadTask = nil }
+
+            var draftText: String?
+            var draftError: (any Error)?
+            if let draftURL {
                 do {
-                    try await tab.document.loadAsync(from: resolved.url)
-                } catch {
-                    // Same fallback as a stale snapshot: leaving fileURL
-                    // on an empty, clean buffer would let a later ⌘S
-                    // truncate the real file. A drafted buffer stays
-                    // visible instead — it's dirty with a nil mtime
-                    // baseline, so saving raises the stale-source check.
-                    if draftText == nil {
-                        tab.kind = .launcher
-                    }
+                    draftText = try await DraftsStore.readText(
+                        at: draftURL,
+                        allowEmpty: snapshot.fileBookmark != nil
+                    )
+                } catch is CancellationError {
                     return
-                }
-                // Disk content is the baseline either way.
-                tab.state.savedBaselineText = tab.document.text
-                tab.state.fileEncoding = tab.document.fileEncoding
-                tab.state.lineEnding = tab.document.lineEnding
-                if let draftText, tab.document.bufferRevision == seedRevision {
-                    // Drafted text wins for the live buffer.
-                    tab.document.text = draftText
-                    tab.document.isDirty = true
-                    tab.state.text = draftText
-                } else if draftText != nil {
-                    // The user typed while the load was in flight —
-                    // re-applying the captured draft would clobber those
-                    // edits. state.text is the freshest snapshot we own.
-                    tab.document.text = tab.state.text
-                    tab.document.isDirty = true
-                } else {
-                    tab.state.text = tab.document.text
+                } catch {
+                    draftError = error
                 }
             }
-            return true
-        } else if let draftText {
-            // Untitled draft: bytes load into the fresh tab; dirty so
-            // the "edited" subtitle stays on until the user saves.
-            tab.document.text = draftText
-            tab.document.isDirty = true
-            tab.state.text = draftText
-            return true
+
+            var sourcePayload: PlainTextDocument.LoadPayload?
+            var sourceError: (any Error)?
+            if let resolvedSource {
+                do {
+                    sourcePayload = try await PlainTextDocument.readPayload(
+                        from: resolvedSource.url
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    sourceError = error
+                }
+            }
+            guard !Task.isCancelled else { return }
+
+            let liveText = state.textView?.text ?? state.text
+            let userEdited = document.bufferRevision != seedRevision
+
+            if let sourcePayload, let resolvedSource {
+                document.applyPayload(sourcePayload, url: resolvedSource.url)
+                DocumentWorkflow.applyLoadedDocument(
+                    document,
+                    at: resolvedSource.url,
+                    to: state
+                )
+            }
+
+            if let draftText {
+                let recoveredText = userEdited ? liveText : draftText
+                if sourcePayload == nil {
+                    document.originalData = nil
+                    document.fileURL = resolvedSource?.url
+                    state.fileURL = resolvedSource?.url
+                    state.savedBaselineText = ""
+                    if let url = resolvedSource?.url {
+                        state.languageIdentifier = LanguageRegistry.identifier(for: url)
+                    }
+                }
+                document.text = recoveredText
+                document.isDirty = true
+                document.draftURL = draftURL
+                document.lineEnding = PlainTextDocument.detectLineEnding(in: recoveredText) ?? .lf
+                if let raw = draftMetadata?.sourceEncodingRaw {
+                    document.fileEncoding = FileEncoding(
+                        encoding: String.Encoding(rawValue: raw),
+                        withUTF8BOM: String.Encoding(rawValue: raw) == .utf8
+                            && (draftMetadata?.sourceHadUTF8BOM ?? false)
+                    )
+                }
+                // A restored draft must retain the capture-time baseline.
+                // Using the just-read attrs would let the next Save silently
+                // overwrite external edits made while the app was away.
+                document.sourceMtimeAtLoad = draftMetadata?.sourceMtime
+                document.sourceSizeAtLoad = draftMetadata?.sourceSize
+                state.text = recoveredText
+                state.fileEncoding = document.fileEncoding
+                state.lineEnding = document.lineEnding
+                state.isLargeFile = !SyntaxLimit.current().allows(
+                    byteCount: recoveredText.utf8.count
+                )
+                state.setText?(recoveredText)
+                tab.kind = .editor
+                state.requestEditorFocus()
+
+                if let resolvedSource {
+                    let liveAttrs = PlainTextDocument.diskAttrs(of: resolvedSource.url)
+                    let recordedMatches = liveAttrs?.mtime == draftMetadata?.sourceMtime
+                        && liveAttrs?.size == draftMetadata?.sourceSize
+                    if liveAttrs == nil {
+                        AppStateBus.shared.presentation.sourceStaleCheck = .missing(
+                            tabID: tab.id,
+                            displayName: resolvedSource.url.lastPathComponent
+                        )
+                    } else if resolvedSource.isStale || !recordedMatches || sourcePayload == nil {
+                        AppStateBus.shared.presentation.sourceStaleCheck = .changedOnAdopt(
+                            tabID: tab.id,
+                            displayName: resolvedSource.url.lastPathComponent
+                        )
+                    }
+                }
+            } else if sourcePayload != nil {
+                // Source restored cleanly. A missing/corrupt draft stays on
+                // disk for the launcher instead of being replaced by empty
+                // content or deleted as part of this clean tab.
+                document.draftURL = nil
+            } else {
+                document.fileURL = nil
+                document.draftURL = nil
+                state.fileURL = nil
+                tab.kind = .launcher
+            }
+
+            if let draftError {
+                AppStateBus.shared.presentation.openErrorMessage =
+                    "Couldn't restore an unsaved draft: \(draftError.localizedDescription)"
+            } else if snapshot.draftFilename != nil, draftURL == nil {
+                AppStateBus.shared.presentation.openErrorMessage =
+                    "A recovery draft from the previous session is missing."
+            } else if let sourceError, draftText == nil {
+                AppStateBus.shared.presentation.openErrorMessage =
+                    "Couldn't restore the source file: \(sourceError.localizedDescription)"
+            }
         }
-        return false
+        return true
     }
 
     private static func resolveBookmark(_ data: Data) -> (url: URL, isStale: Bool)? {

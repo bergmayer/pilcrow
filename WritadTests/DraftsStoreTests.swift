@@ -48,6 +48,42 @@ final class DraftsStoreTests: XCTestCase {
         XCTAssertEqual(store.loadAll().count, 0, "Zero-byte drafts are dropped from recovery")
     }
 
+    func test_adoptDraft_preservesFileUntilNextCommittedDraftWrite() async throws {
+        let url = try XCTUnwrap(store.save(text: "original", existing: nil))
+        let draft = try XCTUnwrap(store.loadAll().first)
+        let tab = TabModel()
+
+        let staleCheck = try await EditorScene.adoptDraft(draft, into: tab)
+        XCTAssertNil(staleCheck)
+
+        XCTAssertEqual(tab.document.text, "original")
+        XCTAssertTrue(tab.document.isDirty)
+        XCTAssertEqual(tab.document.draftURL?.standardizedFileURL, url.standardizedFileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+
+        tab.document.text = "edited"
+        tab.document.writeDraftToSyncFolder()
+
+        XCTAssertEqual(tab.document.draftURL?.standardizedFileURL, url.standardizedFileURL)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "edited")
+        XCTAssertEqual(store.loadAll().count, 1)
+    }
+
+    func test_saveToRealFile_removesCheckedOutDraft() async throws {
+        let draftURL = try XCTUnwrap(store.save(text: "draft body", existing: nil))
+        let draft = try XCTUnwrap(store.loadAll().first)
+        let tab = TabModel()
+
+        let staleCheck = try await EditorScene.adoptDraft(draft, into: tab)
+        XCTAssertNil(staleCheck)
+        let savedURL = tempRoot.appendingPathComponent("saved.txt")
+        try tab.document.save(to: savedURL)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: draftURL.path))
+        XCTAssertNil(tab.document.draftURL)
+        XCTAssertEqual(try String(contentsOf: savedURL, encoding: .utf8), "draft body")
+    }
+
     // MARK: - eviction
 
     func test_save_evictsOldestPastCap() throws {
@@ -177,7 +213,8 @@ final class DraftsStoreTests: XCTestCase {
             sourceDisplay: "Documents › notes.md",
             sourceEncodingRaw: String.Encoding.utf8.rawValue,
             sourceMtime: Date(timeIntervalSince1970: 1_700_000_000),
-            sourceSize: 256
+            sourceSize: 256,
+            sourceHadUTF8BOM: true
         )
         _ = try XCTUnwrap(store.save(text: "body", existing: nil, metadata: metadata))
         let record = try XCTUnwrap(store.loadAll().first)
@@ -187,6 +224,7 @@ final class DraftsStoreTests: XCTestCase {
         XCTAssertEqual(decoded.sourceEncodingRaw, metadata.sourceEncodingRaw)
         XCTAssertEqual(decoded.sourceMtime, metadata.sourceMtime)
         XCTAssertEqual(decoded.sourceSize, metadata.sourceSize)
+        XCTAssertEqual(decoded.sourceHadUTF8BOM, true)
     }
 
     func test_loadAll_sortsNewestFirst() throws {
@@ -211,5 +249,73 @@ final class DraftsStoreTests: XCTestCase {
         let preview = try XCTUnwrap(store.loadAll().first?.preview)
         XCTAssertFalse(preview.contains("\n"))
         XCTAssertLessThanOrEqual(preview.count, 80)
+    }
+
+    func test_emptyFileBackedDraft_isRecoverable() async throws {
+        let metadata = DraftMetadata(
+            sourceBookmark: nil,
+            sourceDisplay: "Documents / emptied.txt",
+            sourceEncodingRaw: String.Encoding.utf8.rawValue,
+            sourceMtime: Date(),
+            sourceSize: 12
+        )
+        _ = try XCTUnwrap(store.save(text: "", existing: nil, metadata: metadata))
+        let draft = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(draft.bytes, 0)
+
+        let tab = TabModel()
+        _ = try await EditorScene.adoptDraft(draft, into: tab)
+        XCTAssertEqual(tab.document.text, "")
+        XCTAssertTrue(tab.document.isDirty, "Deleting all source text is a recoverable edit")
+    }
+
+    func test_failedDraftDecode_doesNotMutateTabOrDeleteDraft() async throws {
+        let url = store.directory.appendingPathComponent("\(UUID().uuidString).txt")
+        try Data([0xFF, 0xFE, 0xFF]).write(to: url)
+        let draft = try XCTUnwrap(store.loadAll().first)
+        let tab = TabModel()
+        tab.document.text = "keep me"
+        tab.state.text = "keep me"
+
+        do {
+            _ = try await EditorScene.adoptDraft(draft, into: tab)
+            XCTFail("Expected invalid UTF-8 to fail recovery")
+        } catch DraftRecoveryFailure.invalidUTF8 {
+            // Expected.
+        }
+
+        XCTAssertEqual(tab.document.text, "keep me")
+        XCTAssertEqual(tab.state.text, "keep me")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func test_localScratch_roundTripsExactBufferAndEmptyFileMetadata() async throws {
+        let id = UUID()
+        defer { ScratchStore.discard(id: id) }
+        let metadata = DraftMetadata(
+            sourceBookmark: nil,
+            sourceDisplay: "Documents / source.txt",
+            sourceEncodingRaw: String.Encoding.utf8.rawValue,
+            sourceMtime: Date(),
+            sourceSize: 1
+        )
+        let sidecar = ScratchSidecar(
+            id: id,
+            revisionKey: "tab-\(id.uuidString)",
+            draftFilename: "existing.txt",
+            metadata: metadata
+        )
+        let exact = "trailing spaces   \nno forced newline"
+        try ScratchStore.write(text: exact, sidecar: sidecar)
+        let record = try XCTUnwrap(ScratchStore.loadAll().first { $0.id == id })
+        let restored = try await DraftsStore.readText(at: record.url)
+        XCTAssertEqual(restored, exact)
+        XCTAssertEqual(record.replacesDraftFilename, "existing.txt")
+
+        try ScratchStore.write(text: "", sidecar: sidecar)
+        let empty = try XCTUnwrap(ScratchStore.loadAll().first { $0.id == id })
+        XCTAssertEqual(empty.bytes, 0)
+        let emptyText = try await DraftsStore.readText(at: empty.url, allowEmpty: true)
+        XCTAssertEqual(emptyText, "")
     }
 }

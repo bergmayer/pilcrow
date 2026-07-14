@@ -415,7 +415,7 @@ struct EditorCommands: Commands {
             }
             .keyboardShortcut(AppShortcut.closeTab)
             Button(action: focused { CommandActions.closeWindow() }) {
-                Label("Close Window", systemImage: "macwindow.badge.xmark")
+                Label("Close Window", systemImage: "macwindow")
             }
             .keyboardShortcut(AppShortcut.closeWindow)
             Button(action: focused(CommandActions.reopenLastClosedTab)) {
@@ -436,7 +436,7 @@ struct EditorCommands: Commands {
                 Label("Pin / Unpin Tab", systemImage: "pin")
             }
             Button(action: focused(CommandActions.closeOtherTabs)) {
-                Label("Close Other Tabs", systemImage: "xmark.rectangle.stack")
+                Label("Close Other Tabs", systemImage: "rectangle.stack.badge.minus")
             }
             Button(action: focused(CommandActions.closeTabsToRight)) {
                 Label("Close Tabs to the Right", systemImage: "arrow.right.to.line")
@@ -509,25 +509,6 @@ struct EditorCommands: Commands {
                 Button("Format as Numbered List", action: focused(CommandActions.convertToNumberedList))
             }
 
-            Divider()
-
-            Menu("Spelling") {
-                Toggle("Check Spelling While Typing",
-                       isOn: bindingFor(\.spellCheck, defaultsKey: AppPreferenceKey.spellCheck))
-                Divider()
-                // Unshortcut'd: ⌘; collides with Command Palette and
-                // ⇧⌘' with Markdown ▸ Blockquote — either would drop
-                // the whole Spelling submenu via `_UIMenuBuilderError`.
-                // Manual check stays useful even when the live
-                // toggle is off (audit on demand without the
-                // squiggles).
-                Button("Check Document Spelling", action: focused(CommandActions.highlightAllMisspellings))
-                Button("Clear Spelling Marks", action: focused(CommandActions.clearMisspellingHighlights))
-                Divider()
-                Button("Find Next Misspelling", action: focused(CommandActions.jumpToNextMisspelling))
-                Button("Learn Spelling of Word", action: focused(CommandActions.learnSelectedWord))
-                Button("Ignore Spelling for Word", action: focused(CommandActions.ignoreSelectedWord))
-            }
         }
     }
 

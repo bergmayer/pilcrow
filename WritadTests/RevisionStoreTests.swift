@@ -29,70 +29,75 @@ final class RevisionStoreTests: XCTestCase {
 
     // MARK: - original anchor
 
-    func test_recordOriginalIfNeeded_writesOriginalOnce() throws {
-        let first = try XCTUnwrap(store.recordOriginalIfNeeded("v0", forKey: key))
+    func test_recordOriginalIfNeeded_writesOriginalOnce() async throws {
+        let recorded = try await store.recordOriginalIfNeeded("v0", forKey: key)
+        let first = try XCTUnwrap(recorded)
         XCTAssertEqual(first.kind, .original)
-        let second = try store.recordOriginalIfNeeded("v0-again", forKey: key)
+        let second = try await store.recordOriginalIfNeeded("v0-again", forKey: key)
         XCTAssertNil(second, "Subsequent calls return nil — original is sticky")
-        let originals = store.entries(forKey: key).filter { $0.kind == .original }
+        let originals = await store.entries(forKey: key).filter { $0.kind == .original }
         XCTAssertEqual(originals.count, 1)
-        XCTAssertEqual(store.loadText(of: originals[0], forKey: key), "v0")
+        let originalText = await store.loadText(of: originals[0], forKey: key)
+        XCTAssertEqual(originalText, "v0")
     }
 
     // MARK: - kinds + coalescing
 
-    func test_recordRevision_manualNeverCoalesces() throws {
-        try store.recordOriginalIfNeeded("v0", forKey: key)
-        try store.recordRevision("v1", kind: .manual, forKey: key)
-        try store.recordRevision("v2", kind: .manual, forKey: key)
-        let manuals = store.entries(forKey: key).filter { $0.kind == .manual }
+    func test_recordRevision_manualNeverCoalesces() async throws {
+        _ = try await store.recordOriginalIfNeeded("v0", forKey: key)
+        _ = try await store.recordRevision("v1", kind: .manual, forKey: key)
+        _ = try await store.recordRevision("v2", kind: .manual, forKey: key)
+        let manuals = await store.entries(forKey: key).filter { $0.kind == .manual }
         XCTAssertEqual(manuals.count, 2)
-        XCTAssertEqual(store.loadText(of: manuals[0], forKey: key), "v1")
-        XCTAssertEqual(store.loadText(of: manuals[1], forKey: key), "v2")
+        let firstText = await store.loadText(of: manuals[0], forKey: key)
+        let secondText = await store.loadText(of: manuals[1], forKey: key)
+        XCTAssertEqual(firstText, "v1")
+        XCTAssertEqual(secondText, "v2")
     }
 
-    func test_recordRevision_consecutiveAutosCoalesce() throws {
-        try store.recordOriginalIfNeeded("v0", forKey: key)
-        try store.recordRevision("a1", kind: .auto, forKey: key)
-        try store.recordRevision("a2", kind: .auto, forKey: key)
-        try store.recordRevision("a3", kind: .auto, forKey: key)
-        let autos = store.entries(forKey: key).filter { $0.kind == .auto }
+    func test_recordRevision_consecutiveAutosCoalesce() async throws {
+        _ = try await store.recordOriginalIfNeeded("v0", forKey: key)
+        _ = try await store.recordRevision("a1", kind: .auto, forKey: key)
+        _ = try await store.recordRevision("a2", kind: .auto, forKey: key)
+        _ = try await store.recordRevision("a3", kind: .auto, forKey: key)
+        let autos = await store.entries(forKey: key).filter { $0.kind == .auto }
         XCTAssertEqual(autos.count, 1, "Consecutive autos within window collapse onto one entry")
-        XCTAssertEqual(store.loadText(of: autos[0], forKey: key), "a3")
+        let autoText = await store.loadText(of: autos[0], forKey: key)
+        XCTAssertEqual(autoText, "a3")
     }
 
-    func test_recordRevision_manualBreaksAutoCoalesceChain() throws {
-        try store.recordOriginalIfNeeded("v0", forKey: key)
-        try store.recordRevision("a1", kind: .auto, forKey: key)
-        try store.recordRevision("m1", kind: .manual, forKey: key)
-        try store.recordRevision("a2", kind: .auto, forKey: key)
-        let kinds = store.entries(forKey: key).map(\.kind)
+    func test_recordRevision_manualBreaksAutoCoalesceChain() async throws {
+        _ = try await store.recordOriginalIfNeeded("v0", forKey: key)
+        _ = try await store.recordRevision("a1", kind: .auto, forKey: key)
+        _ = try await store.recordRevision("m1", kind: .manual, forKey: key)
+        _ = try await store.recordRevision("a2", kind: .auto, forKey: key)
+        let kinds = await store.entries(forKey: key).map(\.kind)
         XCTAssertEqual(kinds, [.original, .auto, .manual, .auto])
     }
 
-    func test_recordRevision_autoOutsideWindowDoesNotCoalesce() throws {
+    func test_recordRevision_autoOutsideWindowDoesNotCoalesce() async throws {
         // 0-second coalesce window guarantees every auto adds a fresh entry.
         let strict = RevisionStore(
             supportDirOverride: tempRoot,
             maxRevisions: 10,
             autoCoalesceWindow: 0
         )
-        try strict.recordOriginalIfNeeded("v0", forKey: key)
-        try strict.recordRevision("a1", kind: .auto, forKey: key)
-        try strict.recordRevision("a2", kind: .auto, forKey: key)
-        let autos = strict.entries(forKey: key).filter { $0.kind == .auto }
+        _ = try await strict.recordOriginalIfNeeded("v0", forKey: key)
+        _ = try await strict.recordRevision("a1", kind: .auto, forKey: key)
+        _ = try await strict.recordRevision("a2", kind: .auto, forKey: key)
+        let autos = await strict.entries(forKey: key).filter { $0.kind == .auto }
         XCTAssertEqual(autos.count, 2)
     }
 
     // MARK: - cap
 
-    func test_evict_keepsOriginalAndDropsOldestNonOriginal() throws {
+    func test_evict_keepsOriginalAndDropsOldestNonOriginal() async throws {
         // maxRevisions is 5 (non-original cap). Write 7 manuals.
-        try store.recordOriginalIfNeeded("v0", forKey: key)
+        _ = try await store.recordOriginalIfNeeded("v0", forKey: key)
         for i in 1...7 {
-            try store.recordRevision("v\(i)", kind: .manual, forKey: key)
+            _ = try await store.recordRevision("v\(i)", kind: .manual, forKey: key)
         }
-        let all = store.entries(forKey: key)
+        let all = await store.entries(forKey: key)
         XCTAssertEqual(all.filter { $0.kind == .original }.count, 1,
                        "Original survives every eviction pass")
         let manuals = all.filter { $0.kind == .manual }
@@ -104,11 +109,70 @@ final class RevisionStoreTests: XCTestCase {
         XCTAssertTrue(previews.contains("v7"))
     }
 
-    func test_clearAll_removesEveryEntryForKey() throws {
-        try store.recordOriginalIfNeeded("v0", forKey: key)
-        try store.recordRevision("v1", kind: .manual, forKey: key)
-        store.clearAll(forKey: key)
-        XCTAssertTrue(store.entries(forKey: key).isEmpty)
+    func test_clearAll_removesEveryEntryForKey() async throws {
+        _ = try await store.recordOriginalIfNeeded("v0", forKey: key)
+        _ = try await store.recordRevision("v1", kind: .manual, forKey: key)
+        await store.clearAll(forKey: key)
+        let remaining = await store.entries(forKey: key)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func test_snapshotAboveByteLimit_isSkipped() async throws {
+        let bounded = RevisionStore(
+            supportDirOverride: tempRoot,
+            maxRevisions: 10,
+            autoCoalesceWindow: 0,
+            maxSnapshotBytes: 4,
+            maxBytesPerDocument: 100,
+            maxTotalBytes: 1_000
+        )
+        let entry = try await bounded.recordRevision(
+            "12345",
+            kind: .manual,
+            forKey: "oversized"
+        )
+        XCTAssertNil(entry)
+        let entries = await bounded.entries(forKey: "oversized")
+        XCTAssertTrue(entries.isEmpty)
+    }
+
+    func test_perDocumentByteLimit_evictsOldestNonOriginal() async throws {
+        let bounded = RevisionStore(
+            supportDirOverride: tempRoot,
+            maxRevisions: 10,
+            autoCoalesceWindow: 0,
+            maxSnapshotBytes: 100,
+            maxBytesPerDocument: 6,
+            maxTotalBytes: 1_000
+        )
+        _ = try await bounded.recordOriginalIfNeeded("o", forKey: "bounded")
+        _ = try await bounded.recordRevision("1111", kind: .manual, forKey: "bounded")
+        _ = try await bounded.recordRevision("2222", kind: .manual, forKey: "bounded")
+
+        let entries = await bounded.entries(forKey: "bounded")
+        XCTAssertEqual(entries.map(\.kind), [.original, .manual])
+        let newest = await bounded.loadText(of: entries[1], forKey: "bounded")
+        XCTAssertEqual(newest, "2222")
+    }
+
+    func test_globalByteLimit_evictsOldestNonOriginalAcrossDocuments() async throws {
+        let bounded = RevisionStore(
+            supportDirOverride: tempRoot,
+            maxRevisions: 10,
+            autoCoalesceWindow: 0,
+            maxSnapshotBytes: 100,
+            maxBytesPerDocument: 100,
+            maxTotalBytes: 6
+        )
+        _ = try await bounded.recordOriginalIfNeeded("a", forKey: "global-a")
+        _ = try await bounded.recordRevision("1111", kind: .manual, forKey: "global-a")
+        _ = try await bounded.recordOriginalIfNeeded("b", forKey: "global-b")
+        _ = try await bounded.recordRevision("2222", kind: .manual, forKey: "global-b")
+
+        let first = await bounded.entries(forKey: "global-a")
+        let second = await bounded.entries(forKey: "global-b")
+        XCTAssertEqual(first.map(\.kind), [.original])
+        XCTAssertEqual(second.map(\.kind), [.original, .manual])
     }
 
     // MARK: - keys
@@ -134,30 +198,33 @@ final class RevisionStoreTests: XCTestCase {
 
     // MARK: - missing snapshot
 
-    func test_loadText_returnsNilIfSnapshotFileGone() throws {
-        try store.recordOriginalIfNeeded("v0", forKey: key)
-        let entry = try XCTUnwrap(store.entries(forKey: key).first)
+    func test_loadText_returnsNilIfSnapshotFileGone() async throws {
+        _ = try await store.recordOriginalIfNeeded("v0", forKey: key)
+        let entries = await store.entries(forKey: key)
+        let entry = try XCTUnwrap(entries.first)
         // Manually delete the snapshot file to simulate disk corruption.
         let snapshotURL = tempRoot
             .appendingPathComponent("Revisions")
             .appendingPathComponent(key)
             .appendingPathComponent("\(entry.index).bin")
         try FileManager.default.removeItem(at: snapshotURL)
-        XCTAssertNil(store.loadText(of: entry, forKey: key))
+        let missing = await store.loadText(of: entry, forKey: key)
+        XCTAssertNil(missing)
     }
 
     // MARK: - manifest persistence
 
-    func test_manifest_survivesAcrossStoreInstances() throws {
-        try store.recordOriginalIfNeeded("v0", forKey: key)
-        try store.recordRevision("v1", kind: .manual, forKey: key)
+    func test_manifest_survivesAcrossStoreInstances() async throws {
+        _ = try await store.recordOriginalIfNeeded("v0", forKey: key)
+        _ = try await store.recordRevision("v1", kind: .manual, forKey: key)
         let fresh = RevisionStore(
             supportDirOverride: tempRoot,
             maxRevisions: 5,
             autoCoalesceWindow: 60
         )
-        let entries = fresh.entries(forKey: key)
+        let entries = await fresh.entries(forKey: key)
         XCTAssertEqual(entries.map(\.kind), [.original, .manual])
-        XCTAssertEqual(fresh.loadText(of: entries[1], forKey: key), "v1")
+        let restored = await fresh.loadText(of: entries[1], forKey: key)
+        XCTAssertEqual(restored, "v1")
     }
 }

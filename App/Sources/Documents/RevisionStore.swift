@@ -18,8 +18,7 @@ import CryptoKit
 /// Older non-original revisions are dropped once `maxRevisions` is
 /// exceeded. The original-on-open snapshot is the "revert all the
 /// way back" anchor.
-@MainActor
-final class RevisionStore {
+actor RevisionStore {
 
     static let shared = RevisionStore()
 
@@ -30,6 +29,12 @@ final class RevisionStore {
     /// Auto-saves within this window of the previous auto revision
     /// overwrite it instead of adding a new entry.
     let autoCoalesceWindow: TimeInterval
+    /// Revisions are a convenience history, not the sole recovery path.
+    /// Large buffers stay protected by Drafts/Scratch without multiplying
+    /// their size dozens of times in this store.
+    let maxSnapshotBytes: Int
+    let maxBytesPerDocument: Int
+    let maxTotalBytes: Int
 
     /// Tests pass an isolated temp directory; production leaves it nil
     /// and we resolve through `applicationSupportDirectory`.
@@ -38,14 +43,20 @@ final class RevisionStore {
     init(
         supportDirOverride: URL? = nil,
         maxRevisions: Int = 50,
-        autoCoalesceWindow: TimeInterval = 60
+        autoCoalesceWindow: TimeInterval = 60,
+        maxSnapshotBytes: Int = 8 * 1_024 * 1_024,
+        maxBytesPerDocument: Int = 50 * 1_024 * 1_024,
+        maxTotalBytes: Int = 500 * 1_024 * 1_024
     ) {
         self.supportDirOverride = supportDirOverride
         self.maxRevisions = maxRevisions
         self.autoCoalesceWindow = autoCoalesceWindow
+        self.maxSnapshotBytes = max(0, maxSnapshotBytes)
+        self.maxBytesPerDocument = max(0, maxBytesPerDocument)
+        self.maxTotalBytes = max(0, maxTotalBytes)
     }
 
-    enum Kind: String, Codable {
+    enum Kind: String, Codable, Sendable {
         case original
         case auto
         case manual
@@ -72,7 +83,7 @@ final class RevisionStore {
         }
     }
 
-    struct Entry: Codable, Identifiable, Hashable {
+    struct Entry: Codable, Identifiable, Hashable, Sendable {
         let id: UUID
         let index: Int
         let timestamp: Date
@@ -108,7 +119,7 @@ final class RevisionStore {
 
     /// Compute the on-disk key for a URL. Used by saved docs so a
     /// reopen of the same file finds its history.
-    static func key(for url: URL) -> String {
+    nonisolated static func key(for url: URL) -> String {
         let path = url.standardizedFileURL.path
         let digest = SHA256.hash(data: Data(path.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
@@ -117,7 +128,7 @@ final class RevisionStore {
 
     /// Untitled docs use a per-tab UUID so revisions follow the tab
     /// across its lifetime even before the user picks a save location.
-    static func keyForUntitledTab(_ uuid: UUID) -> String {
+    nonisolated static func keyForUntitledTab(_ uuid: UUID) -> String {
         "tab-\(uuid.uuidString)"
     }
 
@@ -140,7 +151,7 @@ final class RevisionStore {
     /// window collapse onto the previous auto entry instead of
     /// adding a new one.
     @discardableResult
-    func recordRevision(_ text: String, kind: Kind, forKey key: String) throws -> Entry {
+    func recordRevision(_ text: String, kind: Kind, forKey key: String) throws -> Entry? {
         precondition(kind != .original, "Use recordOriginalIfNeeded for the original snapshot.")
         var manifest = loadManifest(forKey: key)
 
@@ -171,10 +182,11 @@ final class RevisionStore {
 
     // MARK: - Internals
 
-    private func appendEntry(text: String, kind: Kind, manifest: inout Manifest, key: String) throws -> Entry {
+    private func appendEntry(text: String, kind: Kind, manifest: inout Manifest, key: String) throws -> Entry? {
+        let data = Data(text.utf8)
+        guard data.count <= maxSnapshotBytes else { return nil }
         let dir = snapshotsDirectory(forKey: key)
         try ensureDirectory(at: dir)
-        let data = text.data(using: .utf8) ?? Data()
         let index = manifest.nextIndex
         let snapshotURL = dir.appendingPathComponent("\(index).bin")
         do {
@@ -192,17 +204,19 @@ final class RevisionStore {
         manifest.nextIndex += 1
         evictIfNeeded(&manifest, key: key)
         try saveManifest(manifest, forKey: key)
+        enforceGlobalLimit()
         return entry
     }
 
-    private func replaceEntry(at index: Int, text: String, kind: Kind, manifest: inout Manifest, key: String) throws -> Entry {
+    private func replaceEntry(at index: Int, text: String, kind: Kind, manifest: inout Manifest, key: String) throws -> Entry? {
         guard let i = manifest.entries.firstIndex(where: { $0.index == index }) else {
             // Coalesce target vanished — fall through and treat this
             // as a normal append rather than failing the caller.
             return try appendEntry(text: text, kind: kind, manifest: &manifest, key: key)
         }
         let dir = snapshotsDirectory(forKey: key)
-        let data = text.data(using: .utf8) ?? Data()
+        let data = Data(text.utf8)
+        guard data.count <= maxSnapshotBytes else { return nil }
         let snapshotURL = dir.appendingPathComponent("\(index).bin")
         do {
             try data.write(to: snapshotURL, options: .atomic)
@@ -218,7 +232,9 @@ final class RevisionStore {
             preview: makePreview(from: text)
         )
         manifest.entries[i] = updated
+        evictIfNeeded(&manifest, key: key)
         try saveManifest(manifest, forKey: key)
+        enforceGlobalLimit()
         return updated
     }
 
@@ -226,16 +242,99 @@ final class RevisionStore {
         let dir = snapshotsDirectory(forKey: key)
         // Always keep the original. Cap counts the *non-original* tail.
         var nonOriginal = manifest.entries.filter { $0.kind != .original }
-        guard nonOriginal.count > maxRevisions else { return }
-        let excess = nonOriginal.count - maxRevisions
-        // Sort by timestamp ascending so we drop the oldest first.
         nonOriginal.sort { $0.timestamp < $1.timestamp }
-        let toRemove = nonOriginal.prefix(excess)
-        for entry in toRemove {
+        var byteCount = manifest.entries.reduce(0) { $0 + $1.byteSize }
+        while nonOriginal.count > maxRevisions || byteCount > maxBytesPerDocument,
+              let entry = nonOriginal.first {
+            nonOriginal.removeFirst()
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(entry.index).bin"))
             if let idx = manifest.entries.firstIndex(where: { $0.id == entry.id }) {
                 manifest.entries.remove(at: idx)
             }
+            byteCount -= entry.byteSize
+        }
+    }
+
+    /// Global quota keeps histories for an unbounded number of documents
+    /// from growing without limit. Old non-original entries go first; if
+    /// original anchors alone exceed the budget, the least-recently-used
+    /// document history is removed as one unit.
+    private func enforceGlobalLimit() {
+        guard maxTotalBytes >= 0 else { return }
+        let manager = FileManager.default
+        let directories = (try? manager.contentsOfDirectory(
+            at: revisionsRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        struct Candidate {
+            let key: String
+            let entry: Entry
+            let bytes: Int
+        }
+        var manifests: [String: Manifest] = [:]
+        var total = 0
+        var candidates: [Candidate] = []
+
+        for directory in directories {
+            let key = directory.lastPathComponent
+            var manifest = loadManifest(forKey: key)
+            let snapshotFiles = (try? manager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ))?.filter { $0.pathExtension == "bin" } ?? []
+            let existingNames = Set(snapshotFiles.map(\.lastPathComponent))
+            let knownNames = Set(manifest.entries.map { "\($0.index).bin" })
+            for orphan in snapshotFiles where !knownNames.contains(orphan.lastPathComponent) {
+                try? manager.removeItem(at: orphan)
+            }
+            let beforeCount = manifest.entries.count
+            manifest.entries.removeAll { !existingNames.contains("\($0.index).bin") }
+            if manifest.entries.count != beforeCount {
+                try? saveManifest(manifest, forKey: key)
+            }
+            manifests[key] = manifest
+            for entry in manifest.entries {
+                let snapshot = directory.appendingPathComponent("\(entry.index).bin")
+                let bytes = (try? snapshot.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                    ?? entry.byteSize
+                total += bytes
+                if entry.kind != .original {
+                    candidates.append(Candidate(key: key, entry: entry, bytes: bytes))
+                }
+            }
+        }
+        guard total > maxTotalBytes else { return }
+
+        candidates.sort { $0.entry.timestamp < $1.entry.timestamp }
+        for candidate in candidates where total > maxTotalBytes {
+            guard var manifest = manifests[candidate.key],
+                  let index = manifest.entries.firstIndex(where: { $0.id == candidate.entry.id })
+            else { continue }
+            try? manager.removeItem(
+                at: snapshotsDirectory(forKey: candidate.key)
+                    .appendingPathComponent("\(candidate.entry.index).bin")
+            )
+            manifest.entries.remove(at: index)
+            manifests[candidate.key] = manifest
+            total -= candidate.bytes
+            try? saveManifest(manifest, forKey: candidate.key)
+        }
+
+        guard total > maxTotalBytes else { return }
+        let histories = manifests.map { key, manifest in
+            (
+                key: key,
+                latest: manifest.entries.map(\.timestamp).max() ?? .distantPast,
+                bytes: manifest.entries.reduce(0) { $0 + $1.byteSize }
+            )
+        }
+        .sorted { $0.latest < $1.latest }
+        for history in histories where total > maxTotalBytes {
+            try? manager.removeItem(at: directory(forKey: history.key))
+            total -= history.bytes
         }
     }
 

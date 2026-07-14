@@ -54,3 +54,35 @@ targets:
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         GENERATE_INFOPLIST_FILE: "NO"
         CODE_SIGN_ENTITLEMENTS: App/Resources/Writad.entitlements
+
+  WritadTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: WritadTests
+    dependencies:
+      - target: Writad
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.palefire.writad.tests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "YES"
+
+schemes:
+  Writad:
+    build:
+      targets:
+        Writad: all
+        WritadTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - WritadTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

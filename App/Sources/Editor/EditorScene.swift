@@ -16,6 +16,7 @@ struct EditorScene: View {
     @State private var sceneReceivedOpenURL = false
     @State private var didApplySessionRecord = false
     @State private var sceneUUID: String = ""
+    @State private var exportSnapshotBox = ExportSnapshotBox()
     @Bindable private var prefs = AppPreferencesStore.shared
 
     @Namespace private var tabSwitcherNS
@@ -29,34 +30,44 @@ struct EditorScene: View {
     /// Keep the encode pure — an earlier version raced `applyPayload`
     /// and clobbered freshly-loaded files back to "". `fileWrapper`
     /// isn't documented to run on the main thread, hence the hop.
-    private var exportSnapshotProvider: @Sendable () -> Data {
-        let state = state
-        let document = document
+    private func exportSnapshotProvider(for tab: TabModel) -> @Sendable () throws -> Data {
+        let state = tab.state
+        let document = tab.document
+        let tabID = tab.id
+        let box = exportSnapshotBox
         return {
+            let snapshot: (text: String, data: Data)
             if Thread.isMainThread {
-                return MainActor.assumeIsolated {
-                    Self.liveEncodedSnapshot(state: state, document: document)
+                snapshot = try MainActor.assumeIsolated {
+                    try Self.liveEncodedSnapshot(state: state, document: document)
+                }
+            } else {
+                snapshot = try DispatchQueue.main.sync {
+                    try MainActor.assumeIsolated {
+                        try Self.liveEncodedSnapshot(state: state, document: document)
+                    }
                 }
             }
-            return DispatchQueue.main.sync {
-                MainActor.assumeIsolated {
-                    Self.liveEncodedSnapshot(state: state, document: document)
-                }
-            }
+            box.store(.init(tabID: tabID, text: snapshot.text, data: snapshot.data))
+            return snapshot.data
         }
     }
 
-    private static func liveEncodedSnapshot(state: EditorState, document: PlainTextDocument) -> Data {
+    private static func liveEncodedSnapshot(
+        state: EditorState,
+        document: PlainTextDocument
+    ) throws -> (text: String, data: Data) {
         let liveText = state.textView?.text ?? document.text
         let defaults = UserDefaults.standard
-        return (try? PlainTextDocument.encode(
+        let data = try PlainTextDocument.encode(
             text: liveText,
             encoding: document.fileEncoding,
             lineEnding: document.lineEnding,
             trimTrailingWhitespace: defaults.bool(forKey: AppPreferenceKey.trimTrailingWhitespaceOnSave),
             ensureTrailingNewline: defaults.bool(forKey: AppPreferenceKey.ensureTrailingNewline),
             saveUTF8BOMPref: defaults.bool(forKey: AppPreferenceKey.saveUTF8BOM)
-        )) ?? Data()
+        )
+        return (liveText, data)
     }
 
     /// OR over (currentEditor, currentSession): a stale currentEditor
@@ -186,14 +197,6 @@ struct EditorScene: View {
                     tab.state.loadTask?.cancel()
                     tab.state.loadTask = nil
                 }
-                for tab in session.tabs {
-                    if tab.document.fileURL != nil { continue }
-                    let liveText = tab.state.textView?.text ?? tab.document.text
-                    guard !liveText.isEmpty else { continue }
-                    ClosedTabsStore.shared.record(
-                        EditorSession.snapshotRecord(of: tab)
-                    )
-                }
             }
             .background(SceneRegistrationBridge(sceneUUID: sceneUUID))
             // ⌃P alias for the command palette. iPadOS only routes a
@@ -222,15 +225,41 @@ struct EditorScene: View {
             .background(
                 EmptyView().fileExporter(
                     isPresented: isActive ? bus.pickers.binding(for: .saveAs) : .constant(false),
-                    document: TextFileWrapperProxy(snapshot: exportSnapshotProvider),
-                    contentType: PlainTextDocument.supportedWriteType,
-                    defaultFilename: state.fileURL?.deletingPathExtension().lastPathComponent ?? document.displayName
+                    document: TextFileWrapperProxy(snapshot: exportSnapshotProvider(for: session.activeTab)),
+                    contentType: PlainTextDocument.supportedWriteType(for: state.fileURL),
+                    defaultFilename: state.fileURL?.lastPathComponent ?? document.displayName
                 ) { result in
-                    if case let .success(url) = result {
-                        document.fileURL = url
-                        state.fileURL = url
-                        state.languageIdentifier = LanguageRegistry.identifier(for: url)
+                    switch result {
+                    case .success(let url):
+                        guard let snapshot = exportSnapshotBox.take(),
+                              let target = session.tabs.first(where: { $0.id == snapshot.tabID })
+                        else {
+                            bus.presentation.openErrorMessage =
+                                "The file was exported, but its originating tab is no longer open."
+                            return
+                        }
+                        let currentText = target.state.textView?.text ?? target.document.text
+                        target.document.finishExternalSave(
+                            to: url,
+                            savedText: snapshot.text,
+                            savedData: snapshot.data,
+                            currentText: currentText
+                        )
+                        target.state.text = currentText
+                        target.state.fileURL = url
+                        target.state.savedBaselineText = snapshot.text
+                        target.state.fileEncoding = target.document.fileEncoding
+                        target.state.lineEnding = target.document.lineEnding
+                        target.state.languageIdentifier = LanguageRegistry.identifier(for: url)
+                        target.state.isLargeFile = !SyntaxLimit.current().allows(byteCount: snapshot.data.count)
                         RecentFilesStore.shared.record(url)
+                    case .failure(let error):
+                        exportSnapshotBox.clear()
+                        if (error as? CocoaError)?.code == .userCancelled {
+                            return
+                        }
+                        bus.presentation.openErrorMessage =
+                            "Couldn't save \(document.displayName): \(error.localizedDescription)"
                     }
                 }
             )
@@ -392,83 +421,30 @@ struct EditorScene: View {
         tab.state.requestEditorFocus()
     }
 
-    /// Checks the draft out of the synced folder so two devices
-    /// can't have the same buffer open simultaneously. The bytes
-    /// stay in local scratch while the tab is open; close re-
-    /// commits the draft. URL-backed drafts also run the stale-
-    /// source safeguard (missing file / changed since capture).
+    /// Adopts a draft into the active tab. The draft file stays in
+    /// place while the buffer is open so a crash before the next
+    /// close/background write still leaves a recoverable copy. The
+    /// next committed draft write overwrites this same URL; Save /
+    /// Discard still delete it. URL-backed drafts also run the
+    /// stale-source safeguard (missing file / changed since capture).
     private func adoptDraftIntoActiveTab(_ draft: DraftRecord) {
         let tab = session.activeTab
-        let text = (try? String(contentsOf: draft.url, encoding: .utf8))
-            ?? (try? String(contentsOf: draft.url, encoding: .isoLatin1))
-            ?? ""
-        tab.document.text = text
-        tab.document.isDirty = true
-        tab.state.text = text
-        DraftsStore.shared.discard(draft.url)
-        tab.document.draftURL = nil
-
-        if let bookmark = draft.metadata?.sourceBookmark,
-           let resolved = Self.resolveBookmark(bookmark) {
-            let attrs = PlainTextDocument.diskAttrs(of: resolved.url)
-            if attrs == nil {
-                tab.document.fileURL = resolved.url
-                tab.state.fileURL = resolved.url
-                tab.state.languageIdentifier = LanguageRegistry.identifier(for: resolved.url)
-                tab.state.savedBaselineText = ""
-                tab.kind = .editor
-                tab.state.requestEditorFocus()
-                bus.presentation.sourceStaleCheck = .missing(
-                    tabID: tab.id,
-                    displayName: resolved.url.lastPathComponent
-                )
-                return
+        Task {
+            do {
+                if let staleCheck = try await Self.adoptDraft(draft, into: tab) {
+                    bus.presentation.sourceStaleCheck = staleCheck
+                }
+            } catch is CancellationError {
+                // The scene went away while an iCloud draft was loading.
+            } catch {
+                bus.presentation.openErrorMessage = error.localizedDescription
             }
-            tab.document.fileURL = resolved.url
-            tab.state.fileURL = resolved.url
-            tab.state.languageIdentifier = LanguageRegistry.identifier(for: resolved.url)
-            if let rawEncoding = draft.metadata?.sourceEncodingRaw {
-                let encoding = String.Encoding(rawValue: rawEncoding)
-                tab.document.fileEncoding = FileEncoding(encoding: encoding)
-                tab.state.fileEncoding = tab.document.fileEncoding
-            }
-            tab.document.sourceMtimeAtLoad = attrs?.mtime
-            tab.document.sourceSizeAtLoad = attrs?.size
-            let onDisk = (try? String(contentsOf: resolved.url, encoding: .utf8))
-                ?? (try? String(contentsOf: resolved.url, encoding: .isoLatin1))
-                ?? ""
-            tab.state.savedBaselineText = onDisk
-            tab.kind = .editor
-            tab.state.requestEditorFocus()
-            // Did anything change between draft creation and now?
-            // Compare the draft's recorded attrs to current disk.
-            // If we don't have recorded attrs (older draft), skip —
-            // can't reason about drift without a baseline.
-            if let recordedMtime = draft.metadata?.sourceMtime,
-               let recordedSize = draft.metadata?.sourceSize,
-               let liveAttrs = attrs,
-               liveAttrs.mtime != recordedMtime || liveAttrs.size != recordedSize {
-                bus.presentation.sourceStaleCheck = .changedOnAdopt(
-                    tabID: tab.id,
-                    displayName: resolved.url.lastPathComponent
-                )
-            }
-            return
         }
-        tab.state.savedBaselineText = ""
-        tab.kind = .editor
-        tab.state.requestEditorFocus()
     }
 
-    private static func resolveBookmark(_ data: Data) -> (url: URL, isStale: Bool)? {
-        var stale = false
-        guard let url = try? URL(
-            resolvingBookmarkData: data,
-            options: [],
-            relativeTo: nil,
-            bookmarkDataIsStale: &stale
-        ) else { return nil }
-        return (url, stale)
+    @discardableResult
+    static func adoptDraft(_ draft: DraftRecord, into tab: TabModel) async throws -> SourceStaleCheck? {
+        try await DraftRecoveryWorkflow.adopt(draft, into: tab)
     }
 
     /// Stable across tab switches. Keyed off active tab id earlier,
@@ -550,12 +526,14 @@ struct EditorScene: View {
     /// index) under the scene's UUID. Re-saves on every background
     /// transition so a force-quit picks up the latest state.
     private func persistSessionRecord() {
-        guard !sceneUUID.isEmpty else { return }
-        for tab in session.tabs where tab.document.isDirty {
-            if let live = tab.state.textView?.text {
-                tab.document.text = live
+        guard !sceneUUID.isEmpty, !session.isClosingWindow else { return }
+        DraftsStore.shared.withCapEnforcementSuspended {
+            for tab in session.tabs where tab.document.isDirty {
+                if let live = tab.state.textView?.text {
+                    tab.document.text = live
+                }
+                tab.document.autoSave(commitDraft: true)
             }
-            tab.document.autoSave(commitDraft: true)
         }
         // Empty windows (every tab without fileURL or draftURL) are
         // dropped — restoring them would seed phantom Untitled
@@ -565,9 +543,11 @@ struct EditorScene: View {
         }
         guard hasRestorableTab else {
             SessionsStore.shared.remove(forScene: sceneUUID)
+            DraftsStore.shared.enforceCapNow()
             return
         }
         SessionsStore.shared.save(SessionRecord(scene: sceneUUID, session: session))
+        DraftsStore.shared.enforceCapNow()
     }
 
     private func adoptPendingTabIfAvailable() {
@@ -622,51 +602,41 @@ struct EditorScene: View {
     }
 
     private func openURL(_ url: URL) {
-        if session.activeTab.kind != .editor {
-            session.activeTab.kind = .editor
-        }
-        state.loadTask?.cancel()
-        state.loadTask = Task { @MainActor [weak state, weak document] in
-            defer { state?.loadTask = nil }
-            guard let state, let document else { return }
-            do {
-                try await document.loadAsync(from: url)
-            } catch is CancellationError {
-                document.isLoading = false
-                return
-            } catch {
-                AppStateBus.shared.presentation.openErrorMessage = error.localizedDescription
-                return
-            }
-            if Task.isCancelled { return }
-            state.fileURL = url
-            let limit = SyntaxLimit.current()
-            let byteCount = document.originalData?.count ?? document.text.utf8.count
-            state.isLargeFile = !limit.allows(byteCount: byteCount)
-            state.languageIdentifier = LanguageRegistry.identifier(for: url)
-            state.text = document.text
-            // Seed diff baseline with as-loaded text; otherwise every
-            // line shows as added (baseline "" → loaded).
-            state.savedBaselineText = document.text
-            state.fileEncoding = document.fileEncoding
-            state.lineEnding = document.lineEnding
-            state.requestEditorFocus()
-            RecentFilesStore.shared.record(url)
-            let persisted = FoldPersistence.ranges(for: url)
-            if !persisted.isEmpty {
-                DispatchQueue.main.async { [weak state] in
-                    state?.textView?.applyFoldRanges(persisted)
-                }
-            }
-            // Multi-File Search posts target lines; dispatch since
-            // the text view may not be mounted on the first tick
-            // after `state.text` lands.
-            if let line = AppStateBus.shared.pending.goToLine {
-                AppStateBus.shared.pending.goToLine = nil
-                DispatchQueue.main.async { [weak state] in
-                    state?.textView?.goToLine(line)
-                }
-            }
-        }
+        let line = AppStateBus.shared.pending.goToLine
+        AppStateBus.shared.pending.goToLine = nil
+        DocumentWorkflow.open(url, in: session.activeTab, goToLine: line)
+    }
+}
+
+private struct ExportSnapshot: Sendable {
+    let tabID: UUID
+    let text: String
+    let data: Data
+}
+
+/// `.fileExporter` may call the snapshot closure off-main. Keep the exact
+/// bytes and originating tab in a tiny lock-protected handoff so completion
+/// cannot accidentally finalize whichever tab became active later.
+private final class ExportSnapshotBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ExportSnapshot?
+
+    func store(_ snapshot: ExportSnapshot) {
+        lock.lock()
+        value = snapshot
+        lock.unlock()
+    }
+
+    func take() -> ExportSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        defer { value = nil }
+        return value
+    }
+
+    func clear() {
+        lock.lock()
+        value = nil
+        lock.unlock()
     }
 }

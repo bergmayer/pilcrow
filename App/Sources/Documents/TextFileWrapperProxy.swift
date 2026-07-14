@@ -7,16 +7,16 @@ import UniformTypeIdentifiers
 /// the O(n) buffer copy + encode must wait until `fileWrapper` runs
 /// at actual export time.
 struct TextFileWrapperProxy: FileDocument {
-    let snapshot: @Sendable () -> Data
+    let snapshot: @Sendable () throws -> Data
 
     static let readableContentTypes: [UTType] = []
-    static let writableContentTypes: [UTType] = [.plainText]
+    static let writableContentTypes: [UTType] = PlainTextDocument.supportedWriteTypes
 
     init() {
         self.snapshot = { Data() }
     }
 
-    init(snapshot: @escaping @Sendable () -> Data) {
+    init(snapshot: @escaping @Sendable () throws -> Data) {
         self.snapshot = snapshot
     }
 
@@ -26,6 +26,6 @@ struct TextFileWrapperProxy: FileDocument {
     }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: snapshot())
+        FileWrapper(regularFileWithContents: try snapshot())
     }
 }

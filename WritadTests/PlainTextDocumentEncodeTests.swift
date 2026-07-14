@@ -238,4 +238,62 @@ final class PlainTextDocumentEncodeTests: XCTestCase {
         // → "alpha\nbeta\ngamma", then ensure trailing → "alpha\nbeta\ngamma\n".
         XCTAssertEqual(String(data: data, encoding: .utf8), "alpha\nbeta\ngamma\n")
     }
+
+    // MARK: - Multi-file replacement encoding and targeting
+
+    func test_multiFileReplacement_refusesLossyLegacyEncoding() throws {
+        let original = try XCTUnwrap("café".data(using: .isoLatin1))
+        let encoded = MultiFileSearchSheet.encodeReplacement(
+            "café 😀",
+            encoding: .isoLatin1,
+            originalData: original
+        )
+        XCTAssertNil(encoded)
+    }
+
+    func test_multiFileReplacement_preservesUTF16BigEndianBOM() throws {
+        var original = Data([0xFE, 0xFF])
+        original.append(try XCTUnwrap("cat".data(using: .utf16BigEndian)))
+        let encoded = try XCTUnwrap(MultiFileSearchSheet.encodeReplacement(
+            "dog",
+            encoding: .utf16,
+            originalData: original
+        ))
+        XCTAssertTrue(encoded.starts(with: [0xFE, 0xFF]))
+        XCTAssertEqual(
+            String(data: encoded.dropFirst(2), encoding: .utf16BigEndian),
+            "dog"
+        )
+    }
+
+    func test_multiFileQueryReplacement_targetsChosenLiteralMatch() throws {
+        var context = FindContext()
+        context.query = "cat"
+        let result = try MultiFileSearchSheet.replaceInString(
+            "cat cat",
+            query: "cat",
+            replacement: "dog",
+            context: context,
+            limitToFirst: false,
+            targetRanges: [NSRange(location: 4, length: 3)]
+        )
+        XCTAssertEqual(result.0, "cat dog")
+        XCTAssertEqual(result.1, 1)
+    }
+
+    func test_multiFileQueryReplacement_targetsChosenRegexMatchWithCapture() throws {
+        var context = FindContext()
+        context.query = #"a(\d)"#
+        context.useRegex = true
+        let result = try MultiFileSearchSheet.replaceInString(
+            "a1 a2",
+            query: context.query,
+            replacement: "b$1",
+            context: context,
+            limitToFirst: false,
+            targetRanges: [NSRange(location: 3, length: 2)]
+        )
+        XCTAssertEqual(result.0, "a1 b2")
+        XCTAssertEqual(result.1, 1)
+    }
 }

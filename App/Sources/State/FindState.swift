@@ -14,7 +14,7 @@ final class FindState {
     var pendingQueryMode   = false
 }
 
-struct FindContext: Equatable {
+struct FindContext: Equatable, Sendable {
     var query: String = ""
     var replacement: String = ""
     var useRegex: Bool = false

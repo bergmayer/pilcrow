@@ -81,6 +81,9 @@ final class EditorState {
     /// The loading-overlay Cancel button cancels this; the Task
     /// clears it in its `defer`.
     var loadTask: Task<Void, Never>?
+    /// Distinguishes a superseding load from the cancelled task it replaced;
+    /// the older task must not clear the newer task's handle in `defer`.
+    var loadGeneration: UInt64 = 0
 
     /// Reset every keystroke so the disk write only fires after the
     /// user pauses.

@@ -15,6 +15,9 @@ final class EditorSession {
     /// hosting `UIScene` via `SessionsStore.scene(forSceneUUID:)`
     /// instead of guessing from the unordered `connectedScenes`.
     var sceneUUID: String = ""
+    /// Prevents phase/onDisappear persistence from recreating a session
+    /// record after an explicit Close Window request removed it.
+    var isClosingWindow = false
     /// Per-window — used to be a single bool on the shared
     /// PresentationState, which made the switcher overlay flip on every
     /// open scene at once. The Show All Tabs button / ⌘⇧\ / palette
@@ -221,10 +224,19 @@ final class EditorSession {
         // live buffer when the engine view is still around, or a
         // close inside the debounce window archives pre-edit text.
         let liveText = tab.state.textView?.text ?? tab.document.text
+        let shouldSnapshot: Bool
+        if tab.document.fileURL == nil {
+            shouldSnapshot = !liveText.isEmpty
+        } else {
+            // Clean file-backed tabs need only a bookmark. Dirty files,
+            // including an intentional empty buffer, need exact contents.
+            shouldSnapshot = tab.document.isDirty
+        }
         return ClosedTabRecord(
             displayName: tab.document.displayName,
             fileURL: tab.document.fileURL,
-            unsavedSnapshot: liveText.isEmpty ? nil : liveText
+            unsavedSnapshot: shouldSnapshot ? liveText : nil,
+            draftFilename: tab.document.draftURL?.lastPathComponent
         )
     }
 }

@@ -145,11 +145,14 @@ struct RevisionsSheet: View {
     }
 
     private func reload() {
-        entries = RevisionStore.shared.entries(forKey: document.revisionKey)
-        if selection == nil {
-            selection = entriesDisplayOrder.first?.id
+        let key = document.revisionKey
+        Task {
+            entries = await RevisionStore.shared.entries(forKey: key)
+            if selection == nil {
+                selection = entriesDisplayOrder.first?.id
+            }
+            loadPreview()
         }
-        loadPreview()
     }
 
     private func loadPreview() {
@@ -157,23 +160,35 @@ struct RevisionsSheet: View {
             previewText = nil
             return
         }
-        previewText = RevisionStore.shared.loadText(of: entry, forKey: document.revisionKey) ?? ""
+        let key = document.revisionKey
+        previewText = nil
+        Task {
+            let text = await RevisionStore.shared.loadText(of: entry, forKey: key) ?? ""
+            guard selection == entry.id else { return }
+            previewText = text
+        }
     }
 
     // MARK: - Actions
 
     private func revert(to entry: RevisionStore.Entry) {
-        guard let text = RevisionStore.shared.loadText(of: entry, forKey: document.revisionKey) else { return }
-        document.text = text
-        document.isDirty = true
-        // `currentEditor` can point at a different window than the one
-        // that presented this sheet — push into the editor whose tab
-        // actually owns this document.
-        if let editor = owningEditorState {
-            editor.text = text
-            editor.setText?(text)
+        let key = document.revisionKey
+        Task {
+            guard let text = await RevisionStore.shared.loadText(of: entry, forKey: key) else {
+                return
+            }
+            document.text = text
+            document.isDirty = true
+            document.bufferRevision &+= 1
+            // `currentEditor` can point at a different window than the one
+            // that presented this sheet — push into the owning editor.
+            if let editor = owningEditorState {
+                editor.text = text
+                editor.setText?(text)
+            }
+            document.autoSave()
+            dismiss()
         }
-        dismiss()
     }
 
     /// The editor state for the tab that owns `document`, found via

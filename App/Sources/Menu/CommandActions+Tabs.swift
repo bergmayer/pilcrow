@@ -37,10 +37,26 @@ extension CommandActions {
     static func closeWindow(session: EditorSession? = nil) {
         if let target = session ?? Self.session,
            let scene = SessionsStore.shared.scene(forSceneUUID: target.sceneUUID) {
+            target.isClosingWindow = true
+            let closedRecords = target.tabs.map(EditorSession.snapshotRecord(of:))
+            for record in closedRecords {
+                ClosedTabsStore.shared.record(record)
+            }
+            SessionsStore.shared.remove(forScene: target.sceneUUID)
             UIApplication.shared.requestSceneSessionDestruction(
                 scene.session,
                 options: nil,
-                errorHandler: nil
+                errorHandler: { error in
+                    Task { @MainActor in
+                        target.isClosingWindow = false
+                        closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
+                        SessionsStore.shared.save(
+                            SessionRecord(scene: target.sceneUUID, session: target)
+                        )
+                        Self.context.presentation.openErrorMessage =
+                            "Couldn't close the window: \(error.localizedDescription)"
+                    }
+                }
             )
             return
         }
@@ -54,10 +70,38 @@ extension CommandActions {
     /// should go through `closeWindow(session:)`.
     static func destroyForegroundWindowScene() {
         guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) else { return }
+        let target = Self.context.scenes.allOpenSessions.first(where: {
+            SessionsStore.shared.scene(forSceneUUID: $0.sceneUUID) === scene
+        })
+        let closedRecords: [ClosedTabRecord]
+        if let target {
+            target.isClosingWindow = true
+            closedRecords = target.tabs.map(EditorSession.snapshotRecord(of:))
+            for record in closedRecords {
+                ClosedTabsStore.shared.record(record)
+            }
+        } else {
+            closedRecords = []
+        }
+        SessionsStore.shared.removeRecord(
+            forPersistentIdentifier: scene.session.persistentIdentifier
+        )
         UIApplication.shared.requestSceneSessionDestruction(
             scene.session,
             options: nil,
-            errorHandler: nil
+            errorHandler: { error in
+                Task { @MainActor in
+                    if let target {
+                        target.isClosingWindow = false
+                        closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
+                        SessionsStore.shared.save(
+                            SessionRecord(scene: target.sceneUUID, session: target)
+                        )
+                    }
+                    Self.context.presentation.openErrorMessage =
+                        "Couldn't close the window: \(error.localizedDescription)"
+                }
+            }
         )
     }
 
@@ -158,20 +202,25 @@ extension CommandActions {
             Self.context.pickers.pending = .saveAs
             return false
         }
-        if let attrs = PlainTextDocument.diskAttrs(of: url) {
-            // A nil baseline means the load never completed, so we
-            // can't prove the buffer reflects the disk bytes — warn
-            // instead of overwriting silently. (Save Anyway works:
-            // `save()` refreshes the baseline after writing.)
-            let baselineMatches = tab.document.sourceMtimeAtLoad == attrs.mtime
-                && tab.document.sourceSizeAtLoad == attrs.size
-            if !baselineMatches {
-                Self.context.presentation.sourceStaleCheck = .changedOnSave(
-                    tabID: tab.id,
-                    displayName: tab.document.displayName
-                )
-                return false
-            }
+        guard let attrs = PlainTextDocument.diskAttrs(of: url) else {
+            Self.context.presentation.sourceStaleCheck = .missing(
+                tabID: tab.id,
+                displayName: tab.document.displayName
+            )
+            return false
+        }
+        // A nil baseline means the load never completed, so we
+        // can't prove the buffer reflects the disk bytes — warn
+        // instead of overwriting silently. (Save Anyway works:
+        // `save()` refreshes the baseline after writing.)
+        let baselineMatches = tab.document.sourceMtimeAtLoad == attrs.mtime
+            && tab.document.sourceSizeAtLoad == attrs.size
+        if !baselineMatches {
+            Self.context.presentation.sourceStaleCheck = .changedOnSave(
+                tabID: tab.id,
+                displayName: tab.document.displayName
+            )
+            return false
         }
         return performSave(tab: tab)
     }
@@ -196,19 +245,12 @@ extension CommandActions {
               let (_, tab) = resolveTab(for: check),
               let url = tab.document.fileURL
         else { return }
-        // Throw away the draft + scratch — the user picked reload,
-        // so the unsaved bytes are deliberately gone.
-        tab.document.deleteScratchFile()
-        Task { @MainActor in
-            do {
-                try await tab.document.loadAsync(from: url)
-                tab.state.text = tab.document.text
-                tab.state.fileURL = url
-                tab.state.savedBaselineText = tab.document.text
-                tab.state.requestEditorFocus()
-            } catch {
-                Self.context.presentation.openErrorMessage =
-                    "Couldn't reload \(check.displayName): \(error.localizedDescription)"
+        // Keep the recovery files until the replacement load succeeds. A
+        // transient provider failure must not turn the user's explicit
+        // Reload choice into irreversible data loss.
+        DocumentWorkflow.open(url, in: tab) { result in
+            if case .success = result {
+                tab.document.deleteScratchFile()
             }
         }
     }
@@ -323,54 +365,19 @@ extension CommandActions {
     ///     instead of orphaning the old one.
     static func recoverDraft(_ draft: DraftRecord) {
         guard let session = Self.session else { return }
-        let text = (try? String(contentsOf: draft.url, encoding: .utf8))
-            ?? (try? String(contentsOf: draft.url, encoding: .isoLatin1))
-            ?? ""
         let tab = session.newTab(kind: .editor)
-        tab.document.text = text
-        tab.document.isDirty = true
-        tab.document.draftURL = draft.url
-        tab.state.text = text
-        tab.state.requestEditorFocus()
-
-        if let bookmark = draft.metadata?.sourceBookmark,
-           let resolved = resolveBookmark(bookmark) {
-            tab.document.fileURL = resolved.url
-            tab.state.fileURL = resolved.url
-            tab.state.languageIdentifier = LanguageRegistry.identifier(for: resolved.url)
-            if let rawEncoding = draft.metadata?.sourceEncodingRaw {
-                let encoding = String.Encoding(rawValue: rawEncoding)
-                tab.document.fileEncoding = FileEncoding(encoding: encoding)
-                tab.state.fileEncoding = tab.document.fileEncoding
+        Task {
+            do {
+                if let staleCheck = try await DraftRecoveryWorkflow.adopt(draft, into: tab) {
+                    context.presentation.sourceStaleCheck = staleCheck
+                }
+            } catch is CancellationError {
+                session.closeTab(tab.id, disposition: .discard)
+            } catch {
+                session.closeTab(tab.id, disposition: .discard)
+                context.presentation.openErrorMessage = error.localizedDescription
             }
-            // Best-effort baseline: if the file is unreadable (perm
-            // flip, deleted), fall back to "" so every recovered
-            // line shows as added.
-            let onDisk = (try? String(contentsOf: resolved.url, encoding: .utf8))
-                ?? (try? String(contentsOf: resolved.url, encoding: .isoLatin1))
-                ?? ""
-            tab.state.savedBaselineText = onDisk
-            if resolved.isStale {
-                // Bookmark may no longer match (file moved, provider
-                // re-indexed) — refresh on next autosave.
-                tab.document.draftURL = draft.url
-            }
-        } else {
-            tab.state.savedBaselineText = ""
         }
-    }
-
-    /// `nil` when the file no longer exists or the bookmark won't
-    /// resolve.
-    private static func resolveBookmark(_ data: Data) -> (url: URL, isStale: Bool)? {
-        var stale = false
-        guard let url = try? URL(
-            resolvingBookmarkData: data,
-            options: [],
-            relativeTo: nil,
-            bookmarkDataIsStale: &stale
-        ) else { return nil }
-        return (url, stale)
     }
 
     // MARK: - Duplicate / rename
@@ -551,24 +558,100 @@ extension CommandActions {
     /// cleanly. Untitled buffers are rehydrated from the text
     /// snapshot taken at close time.
     static func reopenLastClosedTab() {
-        guard let session = Self.session,
-              let record = session.popRecentlyClosed()
+        guard Self.session != nil,
+              let record = ClosedTabsStore.shared.first
         else { return }
         reopenClosedTab(record)
     }
 
     static func reopenClosedTab(_ record: ClosedTabRecord) {
         guard let session = Self.session else { return }
-        if let url = record.fileURL {
-            Self.routeOpenURL(url)
-            return
+        let store = ClosedTabsStore.shared
+        Task {
+            let snapshot: String?
+            do {
+                snapshot = try await store.loadSnapshot(record)
+            } catch {
+                Self.context.presentation.openErrorMessage = error.localizedDescription
+                return
+            }
+
+            if let url = store.resolveSourceURL(record) {
+                let tab = session.newTab(kind: .editor)
+                DocumentWorkflow.open(url, in: tab) { result in
+                    switch result {
+                    case .success:
+                        if let snapshot {
+                            restoreClosedSnapshot(
+                                snapshot,
+                                record: record,
+                                into: tab,
+                                sourceAvailable: true
+                            )
+                        }
+                        store.remove(record.id)
+                    case .failure:
+                        guard let snapshot else {
+                            session.closeTab(tab.id, disposition: .discard)
+                            return
+                        }
+                        // The source disappeared, but the archived dirty
+                        // bytes are still recoverable as an untitled tab.
+                        restoreClosedSnapshot(
+                            snapshot,
+                            record: record,
+                            into: tab,
+                            sourceAvailable: false
+                        )
+                        store.remove(record.id)
+                    }
+                }
+                return
+            }
+
+            guard snapshot != nil || record.sourceBookmark == nil else {
+                Self.context.presentation.openErrorMessage =
+                    ClosedTabsFailure.sourceUnavailable.localizedDescription
+                return
+            }
+            let tab = session.newTab(kind: .editor)
+            if let snapshot {
+                restoreClosedSnapshot(
+                    snapshot,
+                    record: record,
+                    into: tab,
+                    sourceAvailable: false
+                )
+            } else {
+                tab.state.requestEditorFocus()
+            }
+            store.remove(record.id)
         }
-        let tab = session.newTab(kind: .editor)
-        if let snapshot = record.unsavedSnapshot {
-            tab.document.text = snapshot
-            tab.document.isDirty = true
-            tab.state.text = snapshot
+    }
+
+    private static func restoreClosedSnapshot(
+        _ snapshot: String,
+        record: ClosedTabRecord,
+        into tab: TabModel,
+        sourceAvailable: Bool
+    ) {
+        if !sourceAvailable {
+            tab.document.fileURL = nil
+            tab.state.fileURL = nil
+            tab.state.savedBaselineText = ""
         }
+        tab.document.text = snapshot
+        tab.document.isDirty = true
+        tab.document.bufferRevision &+= 1
+        tab.state.text = snapshot
+        tab.state.setText?(snapshot)
+        if let filename = record.draftFilename {
+            tab.document.draftURL = DraftsStore.shared.readDirectories
+                .map { $0.appendingPathComponent(filename) }
+                .first { FileManager.default.fileExists(atPath: $0.path) }
+        }
+        tab.kind = .editor
         tab.state.requestEditorFocus()
+        tab.document.autoSave()
     }
 }
