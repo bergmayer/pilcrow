@@ -1,7 +1,7 @@
 import Foundation
 
-/// Mirrors macOS's find pasteboard so ⌘G / ⌘⇧G keep working after
-/// the sheet is dismissed.
+/// Retains the current search so ⌘G / ⌘⇧G keep working after the
+/// sheet is dismissed.
 @MainActor
 @Observable
 final class FindState {

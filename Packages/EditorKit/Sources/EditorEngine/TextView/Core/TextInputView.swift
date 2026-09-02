@@ -957,7 +957,7 @@ private extension TextInputView {
     private func handleKeyPressDuringMultistageTextInput(keyCode: UIKeyboardHIDUsage) {
         // When editing multistage text input (that is, we have a marked text) we let the user unmark the text
         // by pressing the arrow keys or Escape. This isn't common in iOS apps but it's the default behavior
-        // on macOS and I think that works quite well for plain text editors on iOS too.
+        // in desktop editors and works well for plain text editors on iOS too.
         guard let markedRange = markedRange, let markedText = stringView.substring(in: markedRange) else {
             return
         }
@@ -1570,12 +1570,7 @@ extension TextInputView {
 
     func compare(_ position: UITextPosition, to other: UITextPosition) -> ComparisonResult {
         guard let indexedPosition = position as? IndexedPosition, let otherIndexedPosition = other as? IndexedPosition else {
-            #if targetEnvironment(macCatalyst)
-            // Mac Catalyst may pass <uninitialized> to `position`. I'm not sure what the right way to deal with that is but returning .orderedSame seems to work.
-            return .orderedSame
-            #else
             fatalError("Positions must be of type \(IndexedPosition.self)")
-            #endif
         }
         if indexedPosition.index < otherIndexedPosition.index {
             return .orderedAscending

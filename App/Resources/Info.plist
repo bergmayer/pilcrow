@@ -217,8 +217,8 @@
 		<true/>
 	</dict>
 
-	<!-- Home Screen Quick Actions: long-press the app icon (or right-click
-	     in macOS dock) to get straight to New File / Command Palette
+	<!-- Home Screen Quick Actions: long-press the app icon to get straight
+	     to New File / Command Palette
 	     without going through the editor first. The handler in the SwiftUI
 	     scene observes the matching `UIApplicationShortcutItem.type` and
 	     fires the corresponding command. -->

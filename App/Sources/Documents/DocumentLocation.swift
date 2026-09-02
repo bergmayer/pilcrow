@@ -88,7 +88,7 @@ enum DocumentLocation {
             return joining([providerName] + rest)
         }
 
-        // 2. macOS/iPadOS CloudStorage path — used since iOS 18 for many
+        // 2. iPadOS CloudStorage path — used since iOS 18 for many
         //    third-party providers (Nextcloud, OneDrive, Google Drive).
         //    Path looks like:
         //      .../Library/CloudStorage/<ProviderName>-<account>/<sub-path>
