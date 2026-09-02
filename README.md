@@ -2,14 +2,26 @@
 
 ![Pilcrow icon](App/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png)
 
----
 
-iPad-native plain-text/code editor with multi-window tabs, menu bar / command palette, and an old time-y document model.
+Pilcrow is a plain-text editor for iPad and iPhone.
 
+## Main functions
+
+- Use multiple windows. Each window can contain multiple tabs.
+- Use the command palette to browse, find, and run editor commands.
+- Open the file browser, multi-file search, settings, and Markdown preview in separate windows.
+
+## New window options
+
+When you create a window, you can:
+
+- Start with a blank document.
+- Open an existing file.
+- Start with text from the clipboard.
+- Create a document from a template.
+- Recover windows and documents that contain unsaved changes.
 
 ## Licensing
-
-
 
 | Component | Source | License |
 |---|---|---|
