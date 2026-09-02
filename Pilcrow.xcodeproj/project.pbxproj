@@ -7,18 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		B2000092 /* DraftsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000092 /* DraftsStoreTests.swift */; };
-		B2000093 /* ClosedTabsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000093 /* ClosedTabsStoreTests.swift */; };
-		B2000094 /* RevisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000094 /* RevisionStoreTests.swift */; };
-		B2000095 /* SessionsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000095 /* SessionsStoreTests.swift */; };
-		B2000096 /* PlainTextDocumentEncodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000096 /* PlainTextDocumentEncodeTests.swift */; };
-		B2000090 /* TransformationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000090 /* TransformationsTests.swift */; };
-		B2000091 /* FuzzyMatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000091 /* FuzzyMatcherTests.swift */; };
-		B2000001 /* WritadApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000001 /* WritadApp.swift */; };
+		B2000001 /* PilcrowApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000001 /* PilcrowApp.swift */; };
 		B2000002 /* PlainTextDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002 /* PlainTextDocument.swift */; };
 		B2000003 /* EditorState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000003 /* EditorState.swift */; };
 		B2000004 /* EditorTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000004 /* EditorTextView.swift */; };
-		B200006B /* EditorTextViewCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006B /* EditorTextViewCoordinator.swift */; };
 		B2000005 /* EditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000005 /* EditorView.swift */; };
 		B2000006 /* EditorCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000006 /* EditorCommands.swift */; };
 		B2000007 /* EncodingPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000007 /* EncodingPickerSheet.swift */; };
@@ -31,10 +23,6 @@
 		B200000E /* EditorActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000E /* EditorActions.swift */; };
 		B200000F /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000F /* AppPreferences.swift */; };
 		B2000010 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000010 /* PreferencesView.swift */; };
-		B200006C /* EditorPreferencesTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006C /* EditorPreferencesTab.swift */; };
-		B200006D /* TypingPreferencesTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006D /* TypingPreferencesTab.swift */; };
-		B200006E /* ToolbarPreferencesTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006E /* ToolbarPreferencesTab.swift */; };
-		B200006F /* AppPreferencesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006F /* AppPreferencesStore.swift */; };
 		B2000011 /* GoToLineSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000011 /* GoToLineSheet.swift */; };
 		B2000012 /* Transformations.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000012 /* Transformations.swift */; };
 		B2000013 /* AppStateBus.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000013 /* AppStateBus.swift */; };
@@ -111,23 +99,33 @@
 		B2000064 /* TemplatesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000064 /* TemplatesStore.swift */; };
 		B2000065 /* NewDocumentLauncherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000065 /* NewDocumentLauncherView.swift */; };
 		B2000066 /* StaleSourceAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000066 /* StaleSourceAlertModifier.swift */; };
+		B2000068 /* BatchCloseAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000068 /* BatchCloseAlertModifier.swift */; };
+		B2000069 /* TabOverviewContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000069 /* TabOverviewContextMenu.swift */; };
+		B200006A /* EditorStatusBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006A /* EditorStatusBar.swift */; };
+		B200006B /* EditorTextViewCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006B /* EditorTextViewCoordinator.swift */; };
+		B200006C /* EditorPreferencesTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006C /* EditorPreferencesTab.swift */; };
+		B200006D /* TypingPreferencesTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006D /* TypingPreferencesTab.swift */; };
+		B200006E /* ToolbarPreferencesTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006E /* ToolbarPreferencesTab.swift */; };
+		B200006F /* AppPreferencesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006F /* AppPreferencesStore.swift */; };
+		B2000090 /* TransformationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000090 /* TransformationsTests.swift */; };
+		B2000091 /* FuzzyMatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000091 /* FuzzyMatcherTests.swift */; };
+		B2000092 /* DraftsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000092 /* DraftsStoreTests.swift */; };
+		B2000093 /* ClosedTabsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000093 /* ClosedTabsStoreTests.swift */; };
+		B2000094 /* RevisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000094 /* RevisionStoreTests.swift */; };
+		B2000095 /* SessionsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000095 /* SessionsStoreTests.swift */; };
+		B2000096 /* PlainTextDocumentEncodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000096 /* PlainTextDocumentEncodeTests.swift */; };
 		B200009A /* OpenErrorAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009A /* OpenErrorAlertModifier.swift */; };
 		B200009B /* PendingCloseAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009B /* PendingCloseAlertModifier.swift */; };
 		B200009C /* EditorObserversModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009C /* EditorObserversModifier.swift */; };
 		B200009D /* PhoneEditorToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009D /* PhoneEditorToolbar.swift */; };
-		B2000067 /* UbiquityContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000067 /* UbiquityContainer.swift */; };
-		B2000068 /* BatchCloseAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000068 /* BatchCloseAlertModifier.swift */; };
-		B2000069 /* TabOverviewContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000069 /* TabOverviewContextMenu.swift */; };
-		B200006A /* EditorStatusBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006A /* EditorStatusBar.swift */; };
 		B2010001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B1010001 /* Assets.xcassets */; };
 		B2020001 /* FileEncoding in Frameworks */ = {isa = PBXBuildFile; productRef = B4000001 /* FileEncoding */; };
 		B2020002 /* LineEnding in Frameworks */ = {isa = PBXBuildFile; productRef = B4000002 /* LineEnding */; };
 		B2020003 /* LineSort in Frameworks */ = {isa = PBXBuildFile; productRef = B4000003 /* LineSort */; };
 		B2020004 /* CharacterInfo in Frameworks */ = {isa = PBXBuildFile; productRef = B4000004 /* CharacterInfo */; };
 		B2020005 /* EditorEngine in Frameworks */ = {isa = PBXBuildFile; productRef = B4000005 /* EditorEngine */; };
-		B2020006 /* WritadSyntax in Frameworks */ = {isa = PBXBuildFile; productRef = B4000006 /* WritadSyntax */; };
+		B2020006 /* PilcrowSyntax in Frameworks */ = {isa = PBXBuildFile; productRef = B4000006 /* PilcrowSyntax */; };
 /* End PBXBuildFile section */
-
 
 /* Begin PBXContainerItemProxy section */
 		BC000001 /* PBXContainerItemProxy */ = {
@@ -135,25 +133,17 @@
 			containerPortal = B8000001 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = B6000001;
-			remoteInfo = Writad;
+			remoteInfo = Pilcrow;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		B1000092 /* DraftsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftsStoreTests.swift; sourceTree = "<group>"; };
-		B1000093 /* ClosedTabsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClosedTabsStoreTests.swift; sourceTree = "<group>"; };
-		B1000094 /* RevisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionStoreTests.swift; sourceTree = "<group>"; };
-		B1000095 /* SessionsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionsStoreTests.swift; sourceTree = "<group>"; };
-		B1000096 /* PlainTextDocumentEncodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlainTextDocumentEncodeTests.swift; sourceTree = "<group>"; };
-		B1010004 /* WritadTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WritadTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B1000090 /* TransformationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransformationsTests.swift; sourceTree = "<group>"; };
-		B1000091 /* FuzzyMatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FuzzyMatcherTests.swift; sourceTree = "<group>"; };
-		B1000000 /* Writad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Writad.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B1000001 /* WritadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WritadApp.swift; sourceTree = "<group>"; };
+		31492A02300A4AEC00D4BAE6 /* Pilcrow.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = Pilcrow.xcodeproj; sourceTree = SOURCE_ROOT; };
+		B1000000 /* Pilcrow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pilcrow.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1000001 /* PilcrowApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PilcrowApp.swift; sourceTree = "<group>"; };
 		B1000002 /* PlainTextDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlainTextDocument.swift; sourceTree = "<group>"; };
 		B1000003 /* EditorState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorState.swift; sourceTree = "<group>"; };
 		B1000004 /* EditorTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTextView.swift; sourceTree = "<group>"; };
-		B100006B /* EditorTextViewCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTextViewCoordinator.swift; sourceTree = "<group>"; };
 		B1000005 /* EditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
 		B1000006 /* EditorCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorCommands.swift; sourceTree = "<group>"; };
 		B1000007 /* EncodingPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncodingPickerSheet.swift; sourceTree = "<group>"; };
@@ -166,10 +156,6 @@
 		B100000E /* EditorActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorActions.swift; sourceTree = "<group>"; };
 		B100000F /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferences.swift; sourceTree = "<group>"; };
 		B1000010 /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
-		B100006C /* EditorPreferencesTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPreferencesTab.swift; sourceTree = "<group>"; };
-		B100006D /* TypingPreferencesTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingPreferencesTab.swift; sourceTree = "<group>"; };
-		B100006E /* ToolbarPreferencesTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolbarPreferencesTab.swift; sourceTree = "<group>"; };
-		B100006F /* AppPreferencesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferencesStore.swift; sourceTree = "<group>"; };
 		B1000011 /* GoToLineSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoToLineSheet.swift; sourceTree = "<group>"; };
 		B1000012 /* Transformations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transformations.swift; sourceTree = "<group>"; };
 		B1000013 /* AppStateBus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateBus.swift; sourceTree = "<group>"; };
@@ -246,17 +232,28 @@
 		B1000064 /* TemplatesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplatesStore.swift; sourceTree = "<group>"; };
 		B1000065 /* NewDocumentLauncherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewDocumentLauncherView.swift; sourceTree = "<group>"; };
 		B1000066 /* StaleSourceAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaleSourceAlertModifier.swift; sourceTree = "<group>"; };
+		B1000068 /* BatchCloseAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchCloseAlertModifier.swift; sourceTree = "<group>"; };
+		B1000069 /* TabOverviewContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabOverviewContextMenu.swift; sourceTree = "<group>"; };
+		B100006A /* EditorStatusBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorStatusBar.swift; sourceTree = "<group>"; };
+		B100006B /* EditorTextViewCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTextViewCoordinator.swift; sourceTree = "<group>"; };
+		B100006C /* EditorPreferencesTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorPreferencesTab.swift; sourceTree = "<group>"; };
+		B100006D /* TypingPreferencesTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingPreferencesTab.swift; sourceTree = "<group>"; };
+		B100006E /* ToolbarPreferencesTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolbarPreferencesTab.swift; sourceTree = "<group>"; };
+		B100006F /* AppPreferencesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferencesStore.swift; sourceTree = "<group>"; };
+		B1000090 /* TransformationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransformationsTests.swift; sourceTree = "<group>"; };
+		B1000091 /* FuzzyMatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FuzzyMatcherTests.swift; sourceTree = "<group>"; };
+		B1000092 /* DraftsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftsStoreTests.swift; sourceTree = "<group>"; };
+		B1000093 /* ClosedTabsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClosedTabsStoreTests.swift; sourceTree = "<group>"; };
+		B1000094 /* RevisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionStoreTests.swift; sourceTree = "<group>"; };
+		B1000095 /* SessionsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionsStoreTests.swift; sourceTree = "<group>"; };
+		B1000096 /* PlainTextDocumentEncodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlainTextDocumentEncodeTests.swift; sourceTree = "<group>"; };
 		B100009A /* OpenErrorAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenErrorAlertModifier.swift; sourceTree = "<group>"; };
 		B100009B /* PendingCloseAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingCloseAlertModifier.swift; sourceTree = "<group>"; };
 		B100009C /* EditorObserversModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorObserversModifier.swift; sourceTree = "<group>"; };
 		B100009D /* PhoneEditorToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneEditorToolbar.swift; sourceTree = "<group>"; };
-		B1000067 /* UbiquityContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UbiquityContainer.swift; sourceTree = "<group>"; };
-		B1000068 /* BatchCloseAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchCloseAlertModifier.swift; sourceTree = "<group>"; };
-		B1000069 /* TabOverviewContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabOverviewContextMenu.swift; sourceTree = "<group>"; };
-		B100006A /* EditorStatusBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorStatusBar.swift; sourceTree = "<group>"; };
 		B1010001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B1010002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		B1010003 /* Writad.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Writad.entitlements; sourceTree = "<group>"; };
+		B1010004 /* PilcrowTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PilcrowTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B1020001 /* EditorKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = EditorKit; path = Packages/EditorKit; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -270,7 +267,7 @@
 				B2020003 /* LineSort in Frameworks */,
 				B2020004 /* CharacterInfo in Frameworks */,
 				B2020005 /* EditorEngine in Frameworks */,
-				B2020006 /* WritadSyntax in Frameworks */,
+				B2020006 /* PilcrowSyntax in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -284,12 +281,18 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		31492A03300A4AEC00D4BAE6 /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
 		B5000001 = {
 			isa = PBXGroup;
 			children = (
+				31492A02300A4AEC00D4BAE6 /* Pilcrow.xcodeproj */,
 				B5000010 /* App */,
 				B5000020 /* Packages */,
-				B5000022 /* WritadTests */,
+				B5000022 /* PilcrowTests */,
 				B5000030 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -323,7 +326,6 @@
 			children = (
 				B1010001 /* Assets.xcassets */,
 				B1010002 /* Info.plist */,
-				B1010003 /* Writad.entitlements */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -331,7 +333,7 @@
 		B5000013 /* App */ = {
 			isa = PBXGroup;
 			children = (
-				B1000001 /* WritadApp.swift */,
+				B1000001 /* PilcrowApp.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -385,20 +387,6 @@
 				B100006A /* EditorStatusBar.swift */,
 			);
 			path = Editor;
-			sourceTree = "<group>";
-		};
-		B5000021 /* State */ = {
-			isa = PBXGroup;
-			children = (
-				B1000013 /* AppStateBus.swift */,
-				B100004E /* SceneRouter.swift */,
-				B1000050 /* PresentationState.swift */,
-				B1000051 /* PendingURLs.swift */,
-				B100004F /* PickerIntents.swift */,
-				B1000031 /* FocusedSceneValues.swift */,
-				B100004D /* FindState.swift */,
-			);
-			path = State;
 			sourceTree = "<group>";
 		};
 		B5000016 /* Menu */ = {
@@ -470,7 +458,6 @@
 				B100002A /* Timing.swift */,
 				B1000030 /* DeviceIdiom.swift */,
 				B1000033 /* PortedThemes.swift */,
-				B1000067 /* UbiquityContainer.swift */,
 			);
 			path = Support;
 			sourceTree = "<group>";
@@ -497,16 +484,21 @@
 			name = Packages;
 			sourceTree = "<group>";
 		};
-		B5000030 /* Products */ = {
+		B5000021 /* State */ = {
 			isa = PBXGroup;
 			children = (
-				B1000000 /* Writad.app */,
-				B1010004 /* WritadTests.xctest */,
+				B1000013 /* AppStateBus.swift */,
+				B100004E /* SceneRouter.swift */,
+				B1000050 /* PresentationState.swift */,
+				B1000051 /* PendingURLs.swift */,
+				B100004F /* PickerIntents.swift */,
+				B1000031 /* FocusedSceneValues.swift */,
+				B100004D /* FindState.swift */,
 			);
-			name = Products;
+			path = State;
 			sourceTree = "<group>";
 		};
-		B5000022 /* WritadTests */ = {
+		B5000022 /* PilcrowTests */ = {
 			isa = PBXGroup;
 			children = (
 				B1000092 /* DraftsStoreTests.swift */,
@@ -517,15 +509,24 @@
 				B1000090 /* TransformationsTests.swift */,
 				B1000091 /* FuzzyMatcherTests.swift */,
 			);
-			path = WritadTests;
+			path = PilcrowTests;
+			sourceTree = "<group>";
+		};
+		B5000030 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B1000000 /* Pilcrow.app */,
+				B1010004 /* PilcrowTests.xctest */,
+			);
+			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		B6000001 /* Writad */ = {
+		B6000001 /* Pilcrow */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = B7000002 /* Build configuration list for PBXNativeTarget "Writad" */;
+			buildConfigurationList = B7000002 /* Build configuration list for PBXNativeTarget "Pilcrow" */;
 			buildPhases = (
 				B3000003 /* Sources */,
 				B3000004 /* Frameworks */,
@@ -535,22 +536,22 @@
 			);
 			dependencies = (
 			);
-			name = Writad;
+			name = Pilcrow;
 			packageProductDependencies = (
 				B4000001 /* FileEncoding */,
 				B4000002 /* LineEnding */,
 				B4000003 /* LineSort */,
 				B4000004 /* CharacterInfo */,
 				B4000005 /* EditorEngine */,
-				B4000006 /* WritadSyntax */,
+				B4000006 /* PilcrowSyntax */,
 			);
-			productName = Writad;
-			productReference = B1000000 /* Writad.app */;
+			productName = Pilcrow;
+			productReference = B1000000 /* Pilcrow.app */;
 			productType = "com.apple.product-type.application";
 		};
-		B6000002 /* WritadTests */ = {
+		B6000002 /* PilcrowTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = B7000003 /* Build configuration list for PBXNativeTarget "WritadTests" */;
+			buildConfigurationList = B7000003 /* Build configuration list for PBXNativeTarget "PilcrowTests" */;
 			buildPhases = (
 				B3000006 /* Sources */,
 				B3000007 /* Frameworks */,
@@ -561,9 +562,9 @@
 			dependencies = (
 				BB000001 /* PBXTargetDependency */,
 			);
-			name = WritadTests;
-			productName = WritadTests;
-			productReference = B1010004 /* WritadTests.xctest */;
+			name = PilcrowTests;
+			productName = PilcrowTests;
+			productReference = B1010004 /* PilcrowTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
@@ -581,7 +582,7 @@
 					};
 				};
 			};
-			buildConfigurationList = B7000001 /* Build configuration list for PBXProject "Writad" */;
+			buildConfigurationList = B7000001 /* Build configuration list for PBXProject "Pilcrow" */;
 			compatibilityVersion = "Xcode 16.0.Superseded.1";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -595,10 +596,16 @@
 			);
 			productRefGroup = B5000030 /* Products */;
 			projectDirPath = "";
+			projectReferences = (
+				{
+					ProductGroup = 31492A03300A4AEC00D4BAE6 /* Products */;
+					ProjectRef = 31492A02300A4AEC00D4BAE6 /* Pilcrow.xcodeproj */;
+				},
+			);
 			projectRoot = "";
 			targets = (
-				B6000001 /* Writad */,
-				B6000002 /* WritadTests */,
+				B6000001 /* Pilcrow */,
+				B6000002 /* PilcrowTests */,
 			);
 		};
 /* End PBXProject section */
@@ -626,7 +633,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B2000001 /* WritadApp.swift in Sources */,
+				B2000001 /* PilcrowApp.swift in Sources */,
 				B2000002 /* PlainTextDocument.swift in Sources */,
 				B2000003 /* EditorState.swift in Sources */,
 				B2000004 /* EditorTextView.swift in Sources */,
@@ -727,7 +734,6 @@
 				B200009B /* PendingCloseAlertModifier.swift in Sources */,
 				B200009C /* EditorObserversModifier.swift in Sources */,
 				B200009D /* PhoneEditorToolbar.swift in Sources */,
-				B2000067 /* UbiquityContainer.swift in Sources */,
 				B2000068 /* BatchCloseAlertModifier.swift in Sources */,
 				B2000069 /* TabOverviewContextMenu.swift in Sources */,
 				B200006A /* EditorStatusBar.swift in Sources */,
@@ -750,11 +756,10 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
-
 /* Begin PBXTargetDependency section */
 		BB000001 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = B6000001 /* Writad */;
+			target = B6000001 /* Pilcrow */;
 			targetProxy = BC000001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -880,9 +885,9 @@
 		BA000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "AppIconBurgundy AppIconIndigo AppIconOchre";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = App/Resources/Writad.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
@@ -901,7 +906,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.writad;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -913,9 +918,9 @@
 		BA000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "AppIconBurgundy AppIconIndigo AppIconOchre";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = App/Resources/Writad.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
@@ -930,7 +935,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.writad;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -949,12 +954,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.writad.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Writad.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Writad";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pilcrow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pilcrow";
 			};
 			name = Debug;
 		};
@@ -968,19 +973,19 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.writad.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Writad.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Writad";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pilcrow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pilcrow";
 			};
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		B7000001 /* Build configuration list for PBXProject "Writad" */ = {
+		B7000001 /* Build configuration list for PBXProject "Pilcrow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				BA000001 /* Debug */,
@@ -989,7 +994,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		B7000002 /* Build configuration list for PBXNativeTarget "Writad" */ = {
+		B7000002 /* Build configuration list for PBXNativeTarget "Pilcrow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				BA000003 /* Debug */,
@@ -998,7 +1003,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		B7000003 /* Build configuration list for PBXNativeTarget "WritadTests" */ = {
+		B7000003 /* Build configuration list for PBXNativeTarget "PilcrowTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				BA000005 /* Debug */,
@@ -1037,9 +1042,9 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = EditorEngine;
 		};
-		B4000006 /* WritadSyntax */ = {
+		B4000006 /* PilcrowSyntax */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = WritadSyntax;
+			productName = PilcrowSyntax;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

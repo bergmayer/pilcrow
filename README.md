@@ -1,6 +1,6 @@
-# writað
+# Pilcrow
 
-![writað icon](w.jpg)
+![Pilcrow icon](App/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png)
 
 ---
 

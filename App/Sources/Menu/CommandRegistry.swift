@@ -110,10 +110,11 @@ enum CommandRegistry {
         // MARK: File / Window
 
         commands += [
-            .init(id: "newTab",     title: "New Tab",                        category: .file, shortcutHint: "⌘T",   synonyms: ["spawn tab", "open empty tab"],     action: CommandActions.newTab,                isEnabled: { true }),
+            .init(id: "newTab",     title: "New",                            category: .file, shortcutHint: "⌘T",   synonyms: ["new document", "new tab", "blank document", "spawn tab", "open empty tab"], action: CommandActions.newTab, isEnabled: { AppStateBus.shared.scenes.currentSession != nil }),
+            .init(id: "newTemplate", title: "New from Template…",             category: .file, synonyms: ["template", "new template document", "template picker"], action: CommandActions.newFromTemplate, isEnabled: { AppStateBus.shared.scenes.currentSession != nil }),
             .init(id: "showTabs",   title: "Show All Tabs",                  category: .file, shortcutHint: "⇧⌘\\", synonyms: ["tab switcher", "tab overview", "expose tabs", "all tabs"], action: CommandActions.showTabSwitcher, isEnabled: { true }),
             .init(id: "reopenTab",  title: "Reopen Last Closed Tab",         category: .file, shortcutHint: "⇧⌘T",  synonyms: ["restore tab", "undo close tab", "recently closed"], action: CommandActions.reopenLastClosedTab, isEnabled: { true }),
-            .init(id: "drafts",     title: "Recover Unsaved Drafts…",       category: .file, synonyms: ["recover drafts", "drafts", "unsaved", "autosaved drafts", "draft recovery"], action: CommandActions.presentDraftsRecovery, isEnabled: { true }),
+            .init(id: "drafts",     title: "Recoverable Work…",            category: .file, synonyms: ["recover work", "recover drafts", "restore window", "drafts", "unsaved", "autosaved drafts", "draft recovery"], action: CommandActions.presentDraftsRecovery, isEnabled: { true }),
             .init(id: "closeTab",   title: "Close Tab",                      category: .file, shortcutHint: "⌘W",   synonyms: ["close current tab"], action: CommandActions.closeActiveTab),
             .init(id: "pinTab",     title: "Pin / Unpin Tab",                category: .file, synonyms: ["pin", "unpin", "favourite tab"], action: CommandActions.pinCurrentTab),
             .init(id: "closeOthers", title: "Close Other Tabs",              category: .file, synonyms: ["close all other tabs"], action: CommandActions.closeOtherTabs),
@@ -274,6 +275,10 @@ enum CommandRegistry {
         // MARK: Snippets / Clipboard
 
         commands += [
+            .init(id: "copyAll",    title: "Copy All",                  category: .edit,
+                  synonyms: ["copy document", "copy entire document", "copy whole file", "clipboard"],
+                  action: CommandActions.copyAll,
+                  isEnabled: { AppStateBus.shared.scenes.currentSession?.activeTab.kind == .editor }),
             .init(id: "snipSave",   title: "Save Selection as Snippet", category: .snippets,
                   synonyms: ["add snippet", "create snippet"],
                   action: CommandActions.saveSelectionAsSnippet,

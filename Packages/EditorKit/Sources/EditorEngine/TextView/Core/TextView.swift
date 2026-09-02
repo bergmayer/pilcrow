@@ -13,15 +13,14 @@ import UIKit
 open class TextView: UIScrollView {
     /// Delegate to receive callbacks for events triggered by the editor.
     public weak var editorDelegate: TextViewDelegate?
+    /// Changes whenever the backing string changes. Asynchronous services
+    /// use this to discard ranges calculated from an obsolete snapshot.
+    private(set) var textGeneration: UInt64 = 0
 
     // MARK: - Accessibility
     //
-    // The text is rendered via CoreText through `TextInputView`/`LineFragmentView`
-    // and isn't exposed to UIAccessibility by default. UI-test runners
-    // (Maestro, XCUITest, Appium, Voice Control) need a way to read the
-    // buffer, so we surface the full string as `accessibilityValue` and the
-    // accessibility label as "Text Editor". This is read-only — input still
-    // flows through the regular UITextInput pipeline.
+    // CoreText content is represented by this containing element while text
+    // navigation/edit operations are forwarded to the backing UITextInput.
 
     open override var isAccessibilityElement: Bool {
         get { true }
@@ -29,7 +28,7 @@ open class TextView: UIScrollView {
     }
 
     open override var accessibilityTraits: UIAccessibilityTraits {
-        get { [.staticText] }
+        get { [] }
         set { /* fixed */ _ = newValue }
     }
 
@@ -57,6 +56,7 @@ open class TextView: UIScrollView {
         }
         set {
             textInputView.string = newValue as NSString
+            textGeneration &+= 1
             contentSize = preferredContentSize
         }
     }
@@ -652,12 +652,6 @@ open class TextView: UIScrollView {
     private let keyboardObserver = KeyboardObserver()
     private let highlightNavigationController = HighlightNavigationController()
     private var textSearchingHelper = UITextSearchingHelper()
-    // Store a reference to instances of the private type UITextRangeAdjustmentGestureRecognizer in order to track adjustments
-    // to the selected text range and scroll the text view when the handles approach the bottom.
-    // The approach is based on the one described in Steve Shephard's blog post "Adventures with UITextInteraction".
-    // https://steveshepard.com/blog/adventures-with-uitextinteraction/
-    private var textRangeAdjustmentGestureRecognizers: Set<UIGestureRecognizer> = []
-    private var previousSelectedRangeDuringGestureHandling: NSRange?
     private var preferredContentSize: CGSize {
         let horizontalOverscrollLength = max(frame.width * horizontalOverscrollFactor, 0)
         let verticalOverscrollLength = max(frame.height * verticalOverscrollFactor, 0)
@@ -666,21 +660,6 @@ open class TextView: UIScrollView {
         let height = baseContentSize.height + verticalOverscrollLength
         return CGSize(width: width, height: height)
     }
-    @available(iOS 26.0, *)
-    private var scrollPocketView: UIView? {
-        if let _scrollPocketView = _scrollPocketView {
-            return _scrollPocketView
-        } else {
-            let stringType = String("IU_".reversed()) + "Scroll" + String("tekcoP".reversed())
-            let scrollPocketView = subviews.first { view in
-                String(describing: type(of: view)) == stringType
-            }
-            _scrollPocketView = scrollPocketView
-            return scrollPocketView
-        }
-    }
-    private var _scrollPocketView: UIView?
-
     /// Create a new text view.
     /// - Parameter frame: The frame rectangle of the text view.
     override public init(frame: CGRect) {
@@ -701,6 +680,9 @@ open class TextView: UIScrollView {
         keyboardObserver.delegate = self
         highlightNavigationController.delegate = self
         textSearchingHelper.textView = self
+        accessibilityTextInputResponder = textInputView
+        accessibilityRespondsToUserInteraction = true
+        accessibilityTextualContext = .wordProcessing
     }
 
     /// The initializer has not been implemented.
@@ -717,9 +699,6 @@ open class TextView: UIScrollView {
         textInputView.frame = CGRect(x: 0, y: 0, width: max(contentSize.width, frame.width), height: max(contentSize.height, frame.height))
         textInputView.viewport = CGRect(origin: contentOffset, size: frame.size)
         bringSubviewToFront(textInputView.gutterContainerView)
-        if #available(iOS 26, *), let scrollPocketView {
-            bringSubviewToFront(scrollPocketView)
-        }
     }
 
     /// Called when the safe area of the view changes.
@@ -769,6 +748,7 @@ open class TextView: UIScrollView {
     /// - Parameter addUndoAction: Whether the state change can be undone. Defaults to false.
     public func setState(_ state: TextViewState, addUndoAction: Bool = false) {
         textInputView.setState(state, addUndoAction: addUndoAction)
+        textGeneration &+= 1
         contentSize = preferredContentSize
     }
 
@@ -1302,22 +1282,6 @@ private extension TextView {
         }
     }
 
-    @objc private func handleTextRangeAdjustmentPan(_ gestureRecognizer: UIPanGestureRecognizer) {
-        // This function scroll the text view when the selected range is adjusted.
-        if gestureRecognizer.state == .began {
-            previousSelectedRangeDuringGestureHandling = selectedRange
-        } else if gestureRecognizer.state == .changed, let previousSelectedRange = previousSelectedRangeDuringGestureHandling {
-            if selectedRange.lowerBound != previousSelectedRange.lowerBound {
-                // User is adjusting the lower bound (location) of the selected range.
-                scrollLocationToVisible(selectedRange.lowerBound)
-            } else if selectedRange.upperBound != previousSelectedRange.upperBound {
-                // User is adjusting the upper bound (length) of the selected range.
-                scrollLocationToVisible(selectedRange.upperBound)
-            }
-            previousSelectedRangeDuringGestureHandling = selectedRange
-        }
-    }
-
     private func insertLeadingComponent(of characterPair: CharacterPair, in range: NSRange) -> Bool {
         let shouldInsertCharacterPair = editorDelegate?.textView(self, shouldInsert: characterPair, in: range) ?? true
         guard shouldInsertCharacterPair else {
@@ -1407,12 +1371,7 @@ private extension TextView {
             isInputAccessoryViewEnabled = true
             textInputView.removeInteraction(nonEditableTextInteraction)
             textInputView.addInteraction(editableTextInteraction)
-            #if compiler(>=5.9)
-            if #available(iOS 17, *) {
-                // Workaround a bug where the caret does not appear until the user taps again on iOS 17 (FB12622609).
-                textInputView.sbs_textSelectionDisplayInteraction?.isActivated = true
-            }
-            #endif
+            textInputView.setNeedsLayout()
         }
     }
 
@@ -1503,6 +1462,7 @@ extension TextView: TextInputViewDelegate {
     }
 
     func textInputViewDidChange(_ view: TextInputView) {
+        textGeneration &+= 1
         if isAutomaticScrollEnabled, let newRange = textInputView.selectedRange, newRange.length == 0 {
             scrollLocationToVisible(newRange.location)
         }
@@ -1563,15 +1523,10 @@ extension TextView: TextInputViewDelegate {
         // There seems to be a bug in UITextInput (or UITextInteraction?) where updating the markedTextRange of a UITextInput
         // will cause the caret to disappear. Removing the editable text interaction and adding it back will work around this issue.
         DispatchQueue.main.async {
-            if !view.viewHierarchyContainsCaret && self.editableTextInteraction.view != nil {
+            if self.editableTextInteraction.view != nil {
                 view.removeInteraction(self.editableTextInteraction)
                 view.addInteraction(self.editableTextInteraction)
-                #if compiler(>=5.9)
-                if #available(iOS 17, *) {
-                    self.textInputView.sbs_textSelectionDisplayInteraction?.isActivated = true
-                    self.textInputView.sbs_textSelectionDisplayInteraction?.sbs_enableCursorBlinks()
-                }
-                #endif
+                view.setNeedsLayout()
             }
         }
     }
@@ -1626,12 +1581,6 @@ extension TextView: UIGestureRecognizerDelegate {
 
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                   shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        if let klass = NSClassFromString("UITextRangeAdjustmentGestureRecognizer") {
-            if !textRangeAdjustmentGestureRecognizers.contains(otherGestureRecognizer) && otherGestureRecognizer.isKind(of: klass) {
-                otherGestureRecognizer.addTarget(self, action: #selector(handleTextRangeAdjustmentPan(_:)))
-                textRangeAdjustmentGestureRecognizers.insert(otherGestureRecognizer)
-            }
-        }
         return gestureRecognizer !== panGestureRecognizer
     }
 }

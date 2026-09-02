@@ -22,6 +22,7 @@ enum EditorSheet: Identifiable {
     case snippetsManager
     case clipboardHistory
     case draftsRecovery
+    case templatePicker
     case tabSwitcher
     case processLines
     case canonize
@@ -58,6 +59,7 @@ enum EditorSheet: Identifiable {
         case .snippetsManager:       return "snippetsManager"
         case .clipboardHistory:      return "clipboardHistory"
         case .draftsRecovery:        return "draftsRecovery"
+        case .templatePicker:        return "templatePicker"
         case .tabSwitcher:           return "tabSwitcher"
         case .processLines:          return "processLines"
         case .canonize:              return "canonize"

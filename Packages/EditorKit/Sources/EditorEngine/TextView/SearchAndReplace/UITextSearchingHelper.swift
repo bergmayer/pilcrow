@@ -105,9 +105,7 @@ extension UITextSearchingHelper: UITextSearching {
         performTextSearch(for: queryString, options: options) { searchResults in
             let replacements = searchResults.map { BatchReplaceSet.Replacement(range: $0.range, text: replacementText) }
             let batchReplaceSet = BatchReplaceSet(replacements: replacements)
-            DispatchQueue.main.sync {
-                self._textView.replaceText(in: batchReplaceSet)
-            }
+            self._textView.replaceText(in: batchReplaceSet)
         }
     }
 
@@ -152,16 +150,46 @@ private extension UITextSearchingHelper {
     @available(iOS 16.0, *)
     private func performTextSearch(for queryString: String, options: UITextSearchOptions, completion: @escaping ([SearchResult]) -> Void) {
         queue.cancelAllOperations()
+        // Capture only immutable state on the main thread. Searching the
+        // editor's live NSMutableString/line tree from this queue races
+        // normal typing and can return invalid ranges.
+        let snapshot = _textView.text
+        let generation = _textView.textGeneration
+        let query = SearchQuery(queryString: queryString, options: options)
         let operation = BlockOperation()
         operation.addExecutionBlock { [weak self, weak operation] in
             guard let self = self, let operation = operation, !operation.isCancelled else {
                 return
             }
-            let query = SearchQuery(queryString: queryString, options: options)
-            let searchResults = self._textView.search(for: query)
-            completion(searchResults)
+            let stringView = StringView(string: snapshot)
+            let lineManager = LineManager(stringView: stringView)
+            lineManager.rebuild()
+            let snapshotDelegate = SnapshotSearchDelegate(lineManager: lineManager)
+            let searchController = SearchController(stringView: stringView)
+            searchController.delegate = snapshotDelegate
+            let searchResults = searchController.search(for: query)
+            DispatchQueue.main.async { [weak self, weak operation] in
+                guard let self, let operation, !operation.isCancelled else { return }
+                guard self.textView?.textGeneration == generation else {
+                    completion([])
+                    return
+                }
+                completion(searchResults)
+            }
         }
         queue.addOperation(operation)
+    }
+}
+
+private final class SnapshotSearchDelegate: SearchControllerDelegate {
+    private let lineManager: LineManager
+
+    init(lineManager: LineManager) {
+        self.lineManager = lineManager
+    }
+
+    func searchController(_ searchController: SearchController, linePositionAt location: Int) -> LinePosition? {
+        lineManager.linePosition(at: location)
     }
 }
 

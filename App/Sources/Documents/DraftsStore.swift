@@ -1,8 +1,9 @@
 import Foundation
 import FileEncoding
 
-/// Sidecar JSON next to each draft .txt. Untitled drafts leave the
-/// fields nil and recover as fresh Untitled tabs.
+/// Metadata embedded in each committed recovery file. Untitled drafts leave
+/// the fields nil and recover as fresh Untitled tabs. Legacy builds stored the
+/// same value in a JSON sidecar, which the reader still accepts.
 struct DraftMetadata: Codable, Sendable {
     /// Security-scoped bookmark, not a raw path: file-provider
     /// locations (Nextcloud, iCloud) need explicit scope to re-open
@@ -25,11 +26,134 @@ struct DraftMetadata: Codable, Sendable {
     var sourceHadUTF8BOM: Bool? = nil
 }
 
+/// A committed recovery snapshot is one atomic file. Older versions wrote
+/// UTF-8 text plus a JSON sidecar; those files remain readable and are
+/// upgraded the next time they are saved.
+private enum RecoveryFile {
+    // Starts with an invalid UTF-8 byte so a legacy plain-text draft cannot
+    // accidentally be mistaken for the envelope format.
+    private static let magic = Data([0x89, 0x57, 0x52, 0x54, 0x44, 0x0D, 0x0A, 0x1A])
+    private static let fixedHeaderSize = 16
+    private static let maximumMetadataBytes = 1 * 1024 * 1024
+
+    struct Header {
+        let metadata: DraftMetadata?
+        let textOffset: Int
+    }
+
+    static func encoded(text: String, metadata: DraftMetadata?) throws -> Data {
+        let metadataData = try metadata.map { try JSONEncoder().encode($0) } ?? Data()
+        var data = Data()
+        let textData = Data(text.utf8)
+        data.reserveCapacity(fixedHeaderSize + metadataData.count + textData.count)
+        data.append(magic)
+
+        let length = UInt64(metadataData.count)
+        for shift in stride(from: 56, through: 0, by: -8) {
+            data.append(UInt8((length >> UInt64(shift)) & 0xff))
+        }
+        data.append(metadataData)
+        data.append(textData)
+        return data
+    }
+
+    static func decoded(from data: Data) throws -> (text: String, metadata: DraftMetadata?)? {
+        guard let header = try header(from: data) else { return nil }
+        guard let text = String(data: data[header.textOffset...], encoding: .utf8) else {
+            throw DraftRecoveryFailure.invalidUTF8
+        }
+        return (text, header.metadata)
+    }
+
+    static func header(at url: URL) -> Header? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let fixed = try? handle.read(upToCount: fixedHeaderSize),
+              let metadataLength = metadataLength(in: fixed)
+        else { return nil }
+        guard metadataLength <= maximumMetadataBytes else { return nil }
+
+        let metadata: DraftMetadata?
+        if metadataLength == 0 {
+            metadata = nil
+        } else {
+            guard let blob = try? handle.read(upToCount: metadataLength),
+                  blob.count == metadataLength,
+                  let decoded = try? JSONDecoder().decode(DraftMetadata.self, from: blob)
+            else { return nil }
+            metadata = decoded
+        }
+        return Header(
+            metadata: metadata,
+            textOffset: fixedHeaderSize + metadataLength
+        )
+    }
+
+    static func preview(at url: URL, textOffset: Int) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: UInt64(textOffset))
+            guard let data = try handle.read(upToCount: 2_048) else { return "" }
+            return String(String(decoding: data, as: UTF8.self).prefix(80))
+                .replacingOccurrences(of: "\n", with: " ")
+        } catch {
+            return ""
+        }
+    }
+
+    private static func header(from data: Data) throws -> Header? {
+        guard let metadataLength = metadataLength(in: data) else { return nil }
+        guard metadataLength <= maximumMetadataBytes else {
+            throw DraftRecoveryFailure.invalidUTF8
+        }
+        let textOffset = fixedHeaderSize + metadataLength
+        guard data.count >= textOffset else { throw DraftRecoveryFailure.invalidUTF8 }
+
+        let metadata: DraftMetadata?
+        if metadataLength == 0 {
+            metadata = nil
+        } else {
+            metadata = try JSONDecoder().decode(
+                DraftMetadata.self,
+                from: data[fixedHeaderSize..<textOffset]
+            )
+        }
+        return Header(metadata: metadata, textOffset: textOffset)
+    }
+
+    private static func metadataLength(in data: Data) -> Int? {
+        guard data.count >= fixedHeaderSize,
+              data.prefix(magic.count) == magic
+        else { return nil }
+        var length: UInt64 = 0
+        for byte in data[magic.count..<fixedHeaderSize] {
+            length = (length << 8) | UInt64(byte)
+        }
+        guard length <= UInt64(Int.max) else { return nil }
+        return Int(length)
+    }
+}
+
+private actor RecoveryWriter {
+    func write(text: String, metadata: DraftMetadata?, to url: URL) throws {
+        let data = try RecoveryFile.encoded(text: text, metadata: metadata)
+        try data.write(to: url, options: .atomic)
+
+        // The atomic file is authoritative. A leftover legacy sidecar is
+        // harmless, but remove it after the replacement succeeds.
+        let legacySidecar = url.deletingPathExtension().appendingPathExtension("json")
+        try? FileManager.default.removeItem(at: legacySidecar)
+    }
+}
+
 /// One recoverable dirty buffer from a previous session.
-/// `Documents/Drafts/<UUID>.txt` + optional `<UUID>.json` sidecar.
+/// `Application Support/Recovery/Drafts/<UUID>.txt`. Older builds may still
+/// contribute plain UTF-8 files with JSON sidecars from their former
+/// Documents location until opened.
 struct DraftRecord: Identifiable, Sendable {
     enum Origin: Sendable {
-        case syncedDraft
+        case storedRecovery
         case localScratch
     }
 
@@ -43,8 +167,9 @@ struct DraftRecord: Identifiable, Sendable {
     /// the doc dirty so the user knows disk still has the old bytes.
     let metadata: DraftMetadata?
     let origin: Origin
-    /// A local scratch may be newer than an existing synced draft. When
-    /// adopted, overwrite that draft instead of creating a duplicate.
+    /// A local scratch may be newer than an existing committed recovery
+    /// snapshot. When adopted, overwrite that snapshot instead of creating
+    /// a duplicate.
     let replacesDraftFilename: String?
 
     init(
@@ -54,7 +179,7 @@ struct DraftRecord: Identifiable, Sendable {
         bytes: Int,
         preview: String,
         metadata: DraftMetadata?,
-        origin: Origin = .syncedDraft,
+        origin: Origin = .storedRecovery,
         replacesDraftFilename: String? = nil
     ) {
         self.id = id
@@ -66,12 +191,21 @@ struct DraftRecord: Identifiable, Sendable {
         self.origin = origin
         self.replacesDraftFilename = replacesDraftFilename
     }
+
+    /// Stable ownership key used by closed-window metadata. A newer scratch
+    /// row shadows its committed recovery file but still belongs to the same
+    /// logical recovery item.
+    var recoveryFilename: String {
+        replacesDraftFilename ?? url.lastPathComponent
+    }
 }
 
-/// Mac-style autosave for every dirty buffer. Writes live text to
-/// `Documents/Drafts/<UUID>.txt` so a system-gesture close
+/// Mac-style recovery for every dirty buffer. Writes live text to a
+/// device-local Application Support directory so a system-gesture close
 /// (3-finger pinch, App Switcher swipe, Stage Manager close) can't
-/// lose typed bytes, with or without a save location.
+/// lose typed bytes, with or without a save location. Legacy Documents
+/// drafts are copied into Application Support and removed from their former
+/// location after a verified write.
 ///
 /// UUID-per-doc + back-reference on `PlainTextDocument.draftURL` so
 /// repeat autosaves overwrite the same file — no orphan accumulation.
@@ -80,103 +214,118 @@ final class DraftsStore {
 
     static let shared = DraftsStore()
 
-    /// Six is enough to span a session's worth of experiments
-    /// without becoming clutter. New pushes oldest out — the sheet
-    /// stays glance-readable.
-    static let maxDrafts = 6
+    /// A generous ceiling for unreferenced legacy/orphan snapshots. Drafts
+    /// referenced by open sessions, closed windows, or recently-closed tabs
+    /// are protected and may take the store above this count rather than be
+    /// deleted silently.
+    static let maxDrafts = 25
 
-    /// Tests pass an isolated temp directory here; production leaves it
-    /// nil and we resolve through `UbiquityContainer` so the iCloud /
-    /// local pick follows the live Settings toggle.
+    /// Tests pass isolated roots. Production writes to Application Support
+    /// and treats the old Documents roots as migration sources.
     private let rootOverride: URL?
+    private let legacyRootOverrides: [URL]
 
     /// Draft filenames the cap must never evict. Defaults to every
-    /// draft referenced by a persisted session record: when several
+    /// draft referenced by a persisted session/closed-item record: when several
     /// dirty tabs commit drafts on backgrounding, FIFO eviction would
     /// otherwise delete drafts just written for other still-open tabs
     /// — permanent data loss on restore. Injectable for tests.
     private let protectedDraftFilenames: @MainActor () -> Set<String>
     private var capSuspensionDepth = 0
+    private let writer = RecoveryWriter()
 
     init(
         rootOverride: URL? = nil,
+        legacyRootOverrides: [URL] = [],
         protectedDraftFilenames: (@MainActor () -> Set<String>)? = nil
     ) {
         self.rootOverride = rootOverride
+        self.legacyRootOverrides = legacyRootOverrides
         self.protectedDraftFilenames = protectedDraftFilenames ?? {
-            Set(SessionsStore.shared.records.flatMap { record in
+            let open = SessionsStore.shared.records.flatMap { record in
                 record.tabs.compactMap(\.draftFilename)
-            })
+            }
+            let closedWindows = ClosedWindowsStore.shared.records.flatMap { record in
+                record.tabs.compactMap(\.draftFilename)
+            }
+            let closedTabs = ClosedTabsStore.shared.records.compactMap(\.draftFilename)
+            return Set(open + closedWindows + closedTabs)
         }
-        // Eagerly ensure draft directories exist so first-write doesn't
-        // race with directory creation when the user toggles iCloud
-        // mid-session.
-        for root in roots {
-            let dir = root.appendingPathComponent("Drafts", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
+        // Eagerly create only the device-local write directory. The legacy
+        // Documents root is never a target for new writes.
+        _ = directory
     }
 
-    /// Where new drafts get written. Resolved on access so a Settings
-    /// toggle of "Sync via iCloud Drive" takes effect immediately
-    /// without needing a relaunch.
+    /// Where every new or updated recovery snapshot is written.
     var directory: URL {
-        let root = rootOverride ?? UbiquityContainer.documentsURLForWrite
+        let root = rootOverride ?? Self.localRecoveryRoot
         let dir = root.appendingPathComponent("Drafts", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
-    /// Every root the launcher should consider when listing drafts —
-    /// iCloud + local. Reading from both means flipping the sync
-    /// toggle never hides existing files; the user's old iCloud
-    /// drafts stay browseable even after going local-only.
+    /// Device-local storage first, followed by legacy locations from older
+    /// builds. Keeping them readable makes migration failure non-destructive.
     var readDirectories: [URL] {
-        roots.map { root in
-            let dir = root.appendingPathComponent("Drafts", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            return dir
+        var directories = [directory]
+        let legacyRoots: [URL]
+        if rootOverride != nil {
+            legacyRoots = legacyRootOverrides
+        } else {
+            legacyRoots = [Self.localDocumentsRoot]
+        }
+        directories.append(contentsOf: legacyRoots.map {
+            $0.appendingPathComponent("Drafts", isDirectory: true)
+        })
+        var seen = Set<String>()
+        return directories.filter {
+            seen.insert($0.standardizedFileURL.path).inserted
         }
     }
 
-    private var roots: [URL] {
-        if let rootOverride { return [rootOverride] }
-        return UbiquityContainer.documentsRootsForRead
+    private static var localRecoveryRoot: URL {
+        let manager = FileManager.default
+        let support = (try? manager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )) ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let root = support.appendingPathComponent("Recovery", isDirectory: true)
+        try? manager.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
     }
 
-    /// Creates a new UUID-named file on first write, overwrites in
-    /// place after that. The returned URL is what the caller should
-    /// stash on `PlainTextDocument.draftURL` so the next autosave
-    /// hits the same path.
+    private static let localDocumentsRoot = FileManager.default.urls(
+        for: .documentDirectory,
+        in: .userDomainMask
+    ).first ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+
+    /// Creates a new UUID-named file on first write and overwrites it in
+    /// place afterward. If `existing` points into the old Documents
+    /// root, the bytes are first committed locally under the same filename;
+    /// only then is the legacy copy removed.
     @discardableResult
-    func save(text: String, existing: URL?, metadata: DraftMetadata? = nil) -> URL? {
-        let url = existing ?? directory.appendingPathComponent("\(UUID().uuidString).txt")
-        let isNew = existing == nil
-        let data = Data(text.utf8)
-        let sidecar = url.deletingPathExtension().appendingPathExtension("json")
-        do {
-            try data.write(to: url, options: .atomic)
-            if let metadata {
-                let blob = try JSONEncoder().encode(metadata)
-                try blob.write(to: sidecar, options: .atomic)
-            } else {
-                // Strip any stale sidecar — the doc may have been
-                // saved-then-reverted, in which case a leftover
-                // sidecar would surface a phantom "source" hint.
-                if FileManager.default.fileExists(atPath: sidecar.path) {
-                    try FileManager.default.removeItem(at: sidecar)
-                }
-            }
-            if capSuspensionDepth == 0 {
-                enforceCap(keeping: url)
-            }
-            return url
-        } catch {
-            if isNew {
-                discard(url)
-            }
-            return nil
+    func save(text: String, existing: URL?, metadata: DraftMetadata? = nil) async throws -> URL {
+        let legacyExisting = existing.flatMap { isLocalRecoveryURL($0) ? nil : $0 }
+        let filename = existing?.lastPathComponent ?? "\(UUID().uuidString).txt"
+        let url = legacyExisting == nil
+            ? (existing ?? directory.appendingPathComponent(filename))
+            : directory.appendingPathComponent(filename)
+        try await writer.write(text: text, metadata: metadata, to: url)
+        if capSuspensionDepth == 0 {
+            enforceCap(keeping: url)
         }
+        if let legacyExisting,
+           legacyExisting.standardizedFileURL != url.standardizedFileURL {
+            discard(legacyExisting)
+        }
+        return url
+    }
+
+    private func isLocalRecoveryURL(_ url: URL) -> Bool {
+        url.deletingLastPathComponent().standardizedFileURL
+            == directory.standardizedFileURL
     }
 
     /// FIFO eviction. `freshlySaved` is exempt even if its mtime
@@ -185,7 +334,7 @@ final class DraftsStore {
     /// caller's brand-new write. Drafts referenced by a persisted
     /// session record are exempt too.
     private func enforceCap(keeping freshlySaved: URL?) {
-        let records = loadSyncedDrafts()
+        let records = loadStoredDrafts(in: [directory])
         guard records.count > Self.maxDrafts else { return }
         let protected = protectedDraftFilenames()
         var toEvict = Array(records.reversed())
@@ -210,6 +359,14 @@ final class DraftsStore {
         return try body()
     }
 
+    func withCapEnforcementSuspended<T>(
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        capSuspensionDepth += 1
+        defer { capSuspensionDepth -= 1 }
+        return try await body()
+    }
+
     func enforceCapNow() {
         enforceCap(keeping: nil)
     }
@@ -223,45 +380,140 @@ final class DraftsStore {
         try? FileManager.default.removeItem(at: sidecar)
     }
 
-    /// Every recoverable draft from every active root (iCloud and
-    /// local), newest first, empties filtered. Reading the union
-    /// means a user who toggled iCloud sync off still sees their
-    /// previously-synced drafts in the launcher.
+    /// Explicit user discard removes every local/legacy copy carrying the
+    /// same recovery UUID, plus any scratch shadow that points back to it.
+    func discardAllCopies(named filename: String) {
+        for dir in readDirectories {
+            discard(dir.appendingPathComponent(filename))
+        }
+        ScratchStore.discard(replacingDraftFilename: filename)
+    }
+
+    /// Explicit discard from a recovery UI. A scratch row may shadow a
+    /// committed snapshot with a different filename; discard both so the
+    /// older copy does not reappear immediately after the newer row vanishes.
+    func discard(_ record: DraftRecord) {
+        if record.origin == .localScratch {
+            if let replaced = record.replacesDraftFilename {
+                discardAllCopies(named: replaced)
+            } else {
+                ScratchStore.discard(url: record.url)
+            }
+        } else {
+            discardAllCopies(named: record.url.lastPathComponent)
+        }
+    }
+
+    /// Used when discarding a closed window. A filename shared with another
+    /// open/closed recovery record remains intact.
+    func discardIfUnreferenced(named filename: String) {
+        guard !protectedDraftFilenames().contains(filename) else { return }
+        discardAllCopies(named: filename)
+    }
+
+    /// Resolves a filename across the local store and any still-present
+    /// migration sources. The preferred URL wins while it exists; callers
+    /// holding a pre-migration record transparently fall through to its new
+    /// local location.
+    func existingRecoveryURL(named filename: String, preferred: URL? = nil) -> URL? {
+        var candidates: [URL] = []
+        if let preferred { candidates.append(preferred) }
+        candidates.append(contentsOf: readDirectories.map {
+            $0.appendingPathComponent(filename)
+        })
+        var seen = Set<String>()
+        return candidates.first {
+            let path = $0.standardizedFileURL.path
+            return seen.insert(path).inserted
+                && FileManager.default.fileExists(atPath: path)
+        }
+    }
+
+    /// One-way upgrade from the old Documents recovery folder. For
+    /// each filename, preserve the newest copy: write it atomically to local
+    /// Application Support, then remove all legacy copies. A download,
+    /// decode, or write failure leaves the old item untouched and visible to
+    /// the recovery UI for a later retry.
+    func migrateLegacyRecovery() async {
+        let legacyDirectories = Array(readDirectories.dropFirst())
+        guard !legacyDirectories.isEmpty else { return }
+
+        let localByFilename = Dictionary(
+            uniqueKeysWithValues: loadStoredDrafts(in: [directory]).map {
+                ($0.url.lastPathComponent, $0)
+            }
+        )
+        let legacyRecords = loadStoredDrafts(in: legacyDirectories)
+
+        for record in legacyRecords {
+            let filename = record.url.lastPathComponent
+            if let local = localByFilename[filename],
+               local.modified >= record.modified {
+                discardLegacyCopies(named: filename, in: legacyDirectories)
+                continue
+            }
+            do {
+                let text = try await Self.readText(
+                    at: record.url,
+                    allowEmpty: record.metadata != nil
+                )
+                _ = try await save(
+                    text: text,
+                    existing: record.url,
+                    metadata: record.metadata
+                )
+                discardLegacyCopies(named: filename, in: legacyDirectories)
+            } catch {
+                // Best effort. loadAll() continues to surface the legacy
+                // record, and the next app launch retries the migration.
+                continue
+            }
+        }
+    }
+
+    private func discardLegacyCopies(named filename: String, in directories: [URL]) {
+        for legacyDirectory in directories {
+            discard(legacyDirectory.appendingPathComponent(filename))
+        }
+    }
+
+    /// Every recoverable snapshot from local storage plus legacy migration
+    /// roots, newest first, with empty untitled records filtered.
     func loadAll() -> [DraftRecord] {
-        let synced = loadSyncedDrafts()
-        guard rootOverride == nil else { return synced }
+        let stored = loadStoredDrafts(in: readDirectories)
+        guard rootOverride == nil else { return stored }
 
         let scratch = ScratchStore.loadAll()
-        let syncedByFilename = Dictionary(
-            uniqueKeysWithValues: synced.map { ($0.url.lastPathComponent, $0) }
+        let storedByFilename = Dictionary(
+            uniqueKeysWithValues: stored.map { ($0.url.lastPathComponent, $0) }
         )
-        var hiddenSyncedFilenames = Set<String>()
+        var hiddenStoredFilenames = Set<String>()
         var visibleScratch: [DraftRecord] = []
 
         for record in scratch {
             guard let filename = record.replacesDraftFilename,
-                  let syncedRecord = syncedByFilename[filename]
+                  let storedRecord = storedByFilename[filename]
             else {
                 visibleScratch.append(record)
                 continue
             }
-            if record.modified >= syncedRecord.modified {
-                hiddenSyncedFilenames.insert(filename)
+            if record.modified >= storedRecord.modified {
+                hiddenStoredFilenames.insert(filename)
                 visibleScratch.append(record)
             }
-            // If the synced copy is newer, the scratch is an obsolete
+            // If the committed copy is newer, the scratch is an obsolete
             // shadow from before the last committed lifecycle flush.
         }
 
-        return (synced.filter { !hiddenSyncedFilenames.contains($0.url.lastPathComponent) }
+        return (stored.filter { !hiddenStoredFilenames.contains($0.url.lastPathComponent) }
             + visibleScratch)
             .sorted { $0.modified > $1.modified }
     }
 
-    private func loadSyncedDrafts() -> [DraftRecord] {
+    private func loadStoredDrafts(in directories: [URL]) -> [DraftRecord] {
         var records: [DraftRecord] = []
         var seen = Set<String>()
-        for dir in readDirectories {
+        for dir in directories {
             let urls = (try? FileManager.default.contentsOfDirectory(
                 at: dir,
                 includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
@@ -274,14 +526,18 @@ final class DraftsStore {
                 let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) ?? UUID()
                 let attrs = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
                 let modified = attrs?.contentModificationDate ?? .distantPast
-                let bytes = attrs?.fileSize ?? 0
+                let storedBytes = attrs?.fileSize ?? 0
                 let sidecar = url.deletingPathExtension().appendingPathExtension("json")
+                let envelopeHeader = RecoveryFile.header(at: url)
                 let metadata: DraftMetadata?
-                if let blob = try? Data(contentsOf: sidecar) {
+                if let envelopeHeader {
+                    metadata = envelopeHeader.metadata
+                } else if let blob = try? Data(contentsOf: sidecar) {
                     metadata = try? JSONDecoder().decode(DraftMetadata.self, from: blob)
                 } else {
                     metadata = nil
                 }
+                let bytes = max(0, storedBytes - (envelopeHeader?.textOffset ?? 0))
                 // A zero-byte file-backed draft means the user deleted
                 // everything. Preserve it. Empty untitled drafts carry no
                 // useful state and remain filtered from the launcher.
@@ -291,13 +547,15 @@ final class DraftsStore {
                     url: url,
                     modified: modified,
                     bytes: bytes,
-                    preview: Self.preview(at: url),
+                    preview: envelopeHeader.map {
+                        RecoveryFile.preview(at: url, textOffset: $0.textOffset)
+                    } ?? Self.legacyPreview(at: url),
                     metadata: metadata
                 ))
             }
         }
-        // The same UUID may exist in both local and iCloud roots after a
-        // sync-toggle change. Surface only the newest copy; constructing a
+        // The same UUID may exist in local and legacy roots during migration.
+        // Surface only the newest copy; constructing a
         // Dictionary directly would trap on that duplicate filename.
         var newestByFilename: [String: DraftRecord] = [:]
         for record in records {
@@ -320,6 +578,12 @@ final class DraftsStore {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             return try Data(contentsOf: url)
         }.value
+        if let decoded = try RecoveryFile.decoded(from: data) {
+            guard allowEmpty || !decoded.text.isEmpty else {
+                throw DraftRecoveryFailure.emptyDraft
+            }
+            return decoded.text
+        }
         guard allowEmpty || !data.isEmpty else { throw DraftRecoveryFailure.emptyDraft }
         guard let text = String(data: data, encoding: .utf8) else {
             throw DraftRecoveryFailure.invalidUTF8
@@ -328,6 +592,13 @@ final class DraftsStore {
     }
 
     nonisolated static func preview(at url: URL) -> String {
+        if let header = RecoveryFile.header(at: url) {
+            return RecoveryFile.preview(at: url, textOffset: header.textOffset)
+        }
+        return legacyPreview(at: url)
+    }
+
+    nonisolated private static func legacyPreview(at url: URL) -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: 2_048) else { return "" }
@@ -337,6 +608,9 @@ final class DraftsStore {
     }
 
     nonisolated static func metadata(at draftURL: URL) -> DraftMetadata? {
+        if let header = RecoveryFile.header(at: draftURL) {
+            return header.metadata
+        }
         let sidecar = draftURL.deletingPathExtension().appendingPathExtension("json")
         guard let data = try? Data(contentsOf: sidecar) else { return nil }
         return try? JSONDecoder().decode(DraftMetadata.self, from: data)
@@ -377,10 +651,10 @@ enum DraftRecoveryFailure: LocalizedError {
     }
 }
 
-/// Metadata for the per-keystroke local crash shadow. The UUID keeps two
+/// Metadata for the debounced local crash shadow. The UUID keeps two
 /// windows editing the same source from overwriting each other, while the
 /// revision key and draft filename reconnect the snapshot to its source and
-/// its last committed synced recovery file after a hard process kill.
+/// its last committed local recovery file after a hard process kill.
 struct ScratchSidecar: Codable, Sendable {
     let id: UUID
     let revisionKey: String
@@ -532,107 +806,151 @@ actor ScratchWriter {
 @MainActor
 enum DraftRecoveryWorkflow {
 
+    private typealias ResolvedSource = (url: URL, isStale: Bool)
+    private typealias DiskAttributes = (mtime: Date, size: Int)
+
+    private struct SourceRecovery {
+        let source: ResolvedSource
+        let attributes: DiskAttributes?
+        let payload: PlainTextDocument.LoadPayload?
+    }
+
     @discardableResult
-    static func adopt(_ draft: DraftRecord, into tab: TabModel) async throws -> SourceStaleCheck? {
+    static func adopt(
+        _ draft: DraftRecord,
+        into tab: TabModel,
+        store: DraftsStore = .shared
+    ) async throws -> SourceStaleCheck? {
         guard draft.bytes <= PlainTextDocument.hardSizeCap else {
             throw PlainTextDocument.DocumentError.fileTooLarge(bytes: draft.bytes)
         }
+        let readableURL = readableURL(for: draft, store: store)
         let text = try await DraftsStore.readText(
-            at: draft.url,
+            at: readableURL,
             allowEmpty: draft.metadata != nil
         )
+        let source = await loadSource(from: draft.metadata)
+        let existing = existingDraftURL(for: draft, readableURL: readableURL, store: store)
+        let adoptedDraftURL = try await store.save(
+            text: text,
+            existing: existing,
+            metadata: draft.metadata
+        )
+        discardOriginal(draft)
+        applyDraft(text, at: adoptedDraftURL, byteCount: draft.bytes, to: tab)
 
-        let resolvedSource: (url: URL, isStale: Bool)? = draft.metadata?.sourceBookmark
-            .flatMap(resolveBookmark)
-        let attrs = resolvedSource.flatMap { PlainTextDocument.diskAttrs(of: $0.url) }
-        let sourcePayload: PlainTextDocument.LoadPayload?
-        if let source = resolvedSource,
-           let payload = try? await PlainTextDocument.readPayload(from: source.url) {
-            sourcePayload = payload
-        } else {
-            sourcePayload = nil
+        guard let source else {
+            tab.state.savedBaselineText = ""
+            tab.kind = .editor
+            tab.state.requestEditorFocus()
+            return nil
         }
+        applySource(source, metadata: draft.metadata, to: tab)
+        let staleCheck = staleCheck(for: source, metadata: draft.metadata, tabID: tab.id)
+        tab.kind = .editor
+        tab.state.requestEditorFocus()
+        return staleCheck
+    }
 
-        let adoptedDraftURL: URL
+    private static func readableURL(for draft: DraftRecord, store: DraftsStore) -> URL {
+        guard draft.origin != .localScratch else { return draft.url }
+        return store.existingRecoveryURL(
+            named: draft.url.lastPathComponent,
+            preferred: draft.url
+        ) ?? draft.url
+    }
+
+    private static func loadSource(from metadata: DraftMetadata?) async -> SourceRecovery? {
+        guard let source = metadata?.sourceBookmark.flatMap(resolveBookmark) else { return nil }
+        let attributes = PlainTextDocument.diskAttrs(of: source.url)
+        let payload = try? await PlainTextDocument.readPayload(from: source.url)
+        return SourceRecovery(source: source, attributes: attributes, payload: payload)
+    }
+
+    private static func existingDraftURL(
+        for draft: DraftRecord,
+        readableURL: URL,
+        store: DraftsStore
+    ) -> URL? {
+        guard draft.origin == .localScratch else { return readableURL }
+        return draft.replacesDraftFilename.flatMap { filename in
+            store.readDirectories
+                .map { $0.appendingPathComponent(filename) }
+                .first { FileManager.default.fileExists(atPath: $0.path) }
+        }
+    }
+
+    private static func discardOriginal(_ draft: DraftRecord) {
         if draft.origin == .localScratch {
-            let existing = draft.replacesDraftFilename.flatMap { filename in
-                DraftsStore.shared.readDirectories
-                    .map { $0.appendingPathComponent(filename) }
-                    .first { FileManager.default.fileExists(atPath: $0.path) }
-            }
-            guard let migrated = DraftsStore.shared.save(
-                text: text,
-                existing: existing,
-                metadata: draft.metadata
-            ) else {
-                throw DraftRecoveryFailure.migrationFailed
-            }
             ScratchStore.discard(url: draft.url)
-            adoptedDraftURL = migrated
         } else {
-            adoptedDraftURL = draft.url
             ScratchStore.discard(replacingDraftFilename: draft.url.lastPathComponent)
         }
+    }
 
+    private static func applyDraft(
+        _ text: String,
+        at draftURL: URL,
+        byteCount: Int,
+        to tab: TabModel
+    ) {
         tab.document.text = text
         tab.document.isDirty = true
         tab.document.fileURL = nil
-        tab.document.draftURL = adoptedDraftURL
+        tab.document.draftURL = draftURL
         tab.document.lineEnding = PlainTextDocument.detectLineEnding(in: text) ?? .lf
         tab.state.text = text
         tab.state.fileURL = nil
         tab.state.lineEnding = tab.document.lineEnding
-        tab.state.isLargeFile = !SyntaxLimit.current().allows(byteCount: draft.bytes)
+        tab.state.isLargeFile = !SyntaxLimit.current().allows(byteCount: byteCount)
+    }
 
-        if let resolvedSource {
-            tab.document.fileURL = resolvedSource.url
-            tab.state.fileURL = resolvedSource.url
-            tab.state.languageIdentifier = LanguageRegistry.identifier(for: resolvedSource.url)
-            if let rawEncoding = draft.metadata?.sourceEncodingRaw {
-                let encoding = String.Encoding(rawValue: rawEncoding)
-                tab.document.fileEncoding = FileEncoding(
-                    encoding: encoding,
-                    withUTF8BOM: encoding == .utf8
-                        && (draft.metadata?.sourceHadUTF8BOM ?? false)
-                )
-            } else if let sourcePayload {
-                tab.document.fileEncoding = sourcePayload.encoding
-            }
-            tab.document.originalData = sourcePayload?.data
-            tab.state.fileEncoding = tab.document.fileEncoding
-            tab.document.sourceMtimeAtLoad = attrs?.mtime
-            tab.document.sourceSizeAtLoad = attrs?.size
-            tab.state.savedBaselineText = sourcePayload?.text ?? ""
-            tab.kind = .editor
-            tab.state.requestEditorFocus()
-
-            guard let attrs else {
-                return .missing(tabID: tab.id, displayName: resolvedSource.url.lastPathComponent)
-            }
-            if sourcePayload == nil || resolvedSource.isStale {
-                return .changedOnAdopt(
-                    tabID: tab.id,
-                    displayName: resolvedSource.url.lastPathComponent
-                )
-            }
-            if let recordedMtime = draft.metadata?.sourceMtime,
-               let recordedSize = draft.metadata?.sourceSize,
-               attrs.mtime != recordedMtime || attrs.size != recordedSize {
-                return .changedOnAdopt(
-                    tabID: tab.id,
-                    displayName: resolvedSource.url.lastPathComponent
-                )
-            }
-            return nil
+    private static func applySource(
+        _ recovery: SourceRecovery,
+        metadata: DraftMetadata?,
+        to tab: TabModel
+    ) {
+        let sourceURL = recovery.source.url
+        tab.document.fileURL = sourceURL
+        tab.state.fileURL = sourceURL
+        tab.state.languageIdentifier = LanguageRegistry.identifier(for: sourceURL)
+        if let rawEncoding = metadata?.sourceEncodingRaw {
+            let encoding = String.Encoding(rawValue: rawEncoding)
+            tab.document.fileEncoding = FileEncoding(
+                encoding: encoding,
+                withUTF8BOM: encoding == .utf8 && (metadata?.sourceHadUTF8BOM ?? false)
+            )
+        } else if let payload = recovery.payload {
+            tab.document.fileEncoding = payload.encoding
         }
+        tab.document.originalData = recovery.payload?.data
+        tab.state.fileEncoding = tab.document.fileEncoding
+        tab.document.sourceMtimeAtLoad = recovery.attributes?.mtime
+        tab.document.sourceSizeAtLoad = recovery.attributes?.size
+        tab.state.savedBaselineText = recovery.payload?.text ?? ""
+    }
 
-        tab.state.savedBaselineText = ""
-        tab.kind = .editor
-        tab.state.requestEditorFocus()
+    private static func staleCheck(
+        for recovery: SourceRecovery,
+        metadata: DraftMetadata?,
+        tabID: UUID
+    ) -> SourceStaleCheck? {
+        let displayName = recovery.source.url.lastPathComponent
+        guard let attributes = recovery.attributes else {
+            return .missing(tabID: tabID, displayName: displayName)
+        }
+        guard recovery.payload != nil, !recovery.source.isStale else {
+            return .changedOnAdopt(tabID: tabID, displayName: displayName)
+        }
+        if let recordedMtime = metadata?.sourceMtime,
+           let recordedSize = metadata?.sourceSize,
+           attributes.mtime != recordedMtime || attributes.size != recordedSize {
+            return .changedOnAdopt(tabID: tabID, displayName: displayName)
+        }
         return nil
     }
 
-    private static func resolveBookmark(_ data: Data) -> (url: URL, isStale: Bool)? {
+    private static func resolveBookmark(_ data: Data) -> ResolvedSource? {
         var stale = false
         guard let url = try? URL(
             resolvingBookmarkData: data,

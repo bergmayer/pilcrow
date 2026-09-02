@@ -274,6 +274,21 @@ enum MarkdownListContinuation {
 @MainActor
 enum DocumentWorkflow {
 
+    /// Reloads the source and, only after a successful load, removes every
+    /// recovery copy containing the edits the user explicitly discarded.
+    static func revert(
+        _ url: URL,
+        in tab: TabModel,
+        completion: (@MainActor (Result<Void, any Error>) -> Void)? = nil
+    ) {
+        open(url, in: tab) { result in
+            if case .success = result {
+                tab.document.deleteScratchFile()
+            }
+            completion?(result)
+        }
+    }
+
     static func open(
         _ url: URL,
         in tab: TabModel,
@@ -304,7 +319,7 @@ enum DocumentWorkflow {
                 return
             } catch {
                 if !hadRenderableContent {
-                    tab.kind = .launcher
+                    tab.kind = .editor
                     document.fileURL = nil
                     state.fileURL = nil
                 }

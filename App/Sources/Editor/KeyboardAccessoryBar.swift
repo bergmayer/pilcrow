@@ -21,14 +21,14 @@ enum KeyboardAccessoryBar {
 
         if hasHardwareKeyboard {
             // Hardware-keyboard mode → no soft keyboard, no accessory.
-            // `[]` would let iPadOS render its DEFAULT floating shortcut
-            // bar (undo/redo/brackets) at the window bottom — the exact
-            // "attaches to window, not soft keyboard" regression. A
-            // non-nil group with zero items tells iPadOS we're handling
-            // the bar ourselves with nothing in it; it draws no bar.
             textView.inputAccessoryView = nil
-            assistant.leadingBarButtonGroups = [Self.emptyGroup]
-            assistant.trailingBarButtonGroups = [Self.emptyGroup]
+            // An empty UIBarButtonItemGroup is not a valid shortcut
+            // container on current iOS releases and makes UIKit repeatedly
+            // try to install a handler for an item at index zero. Clear the
+            // public arrays instead and let the assistant hide its shortcuts.
+            assistant.leadingBarButtonGroups = []
+            assistant.trailingBarButtonGroups = []
+            assistant.allowsHidingShortcuts = true
             detachIPadObserver(from: textView)
             return
         }
@@ -37,15 +37,13 @@ enum KeyboardAccessoryBar {
             if !(textView.inputAccessoryView is EditorAccessoryView) {
                 textView.inputAccessoryView = EditorAccessoryView(host: textView)
             }
-            // Same defensive group on iPhone — even though we own the
-            // accessoryView, iPadOS-style chrome shows up under some
-            // Stage Manager arrangements that report iPhone idiom in a
-            // resized window.
-            assistant.leadingBarButtonGroups = [Self.emptyGroup]
-            assistant.trailingBarButtonGroups = [Self.emptyGroup]
+            assistant.leadingBarButtonGroups = []
+            assistant.trailingBarButtonGroups = []
+            assistant.allowsHidingShortcuts = true
             detachIPadObserver(from: textView)
         } else {
             textView.inputAccessoryView = nil
+            assistant.allowsHidingShortcuts = true
             let observer = IPadAccessoryObserver(host: textView)
             assistant.leadingBarButtonGroups = [
                 UIBarButtonItemGroup(barButtonItems: observer.leadingItems, representativeItem: nil)
@@ -56,13 +54,6 @@ enum KeyboardAccessoryBar {
             attachIPadObserver(observer, to: textView)
         }
     }
-
-    /// Sentinel "we are providing zero items" group. iPadOS treats it
-    /// as a deliberate empty-bar instruction rather than falling back
-    /// to its own undo/redo/brackets defaults at the window bottom.
-    private static let emptyGroup: UIBarButtonItemGroup = {
-        UIBarButtonItemGroup(barButtonItems: [], representativeItem: nil)
-    }()
 
     private static func attachHardwareKeyboardObserver(for textView: EditorEngine.TextView) {
         let holder = KeyboardObserverHolder { [weak textView] in
@@ -316,21 +307,40 @@ enum CaretMover {
         let nsText = textView.text as NSString
         let length = nsText.length
         guard length > 0 else { return }
-        var idx = textView.selectedRange.location
-        let isWord: (unichar) -> Bool = { ch in
-            (ch >= 0x30 && ch <= 0x39) ||
-            (ch >= 0x41 && ch <= 0x5A) ||
-            (ch >= 0x61 && ch <= 0x7A) ||
-            ch == 0x5F
-        }
-        if forward {
-            while idx < length, !isWord(nsText.character(at: idx)) { idx += 1 }
-            while idx < length,  isWord(nsText.character(at: idx)) { idx += 1 }
-        } else {
-            while idx > 0, !isWord(nsText.character(at: idx - 1)) { idx -= 1 }
-            while idx > 0,  isWord(nsText.character(at: idx - 1)) { idx -= 1 }
-        }
+        let cursor = textView.selectedRange.location
+        let idx = forward
+            ? nextWordEnd(in: nsText, from: cursor)
+            : previousWordStart(in: nsText, from: cursor)
         textView.selectedRange = NSRange(location: idx, length: 0)
+    }
+
+    private static func nextWordEnd(in text: NSString, from location: Int) -> Int {
+        var location = location
+        while location < text.length, !isWordCharacter(text.character(at: location)) {
+            location += 1
+        }
+        while location < text.length, isWordCharacter(text.character(at: location)) {
+            location += 1
+        }
+        return location
+    }
+
+    private static func previousWordStart(in text: NSString, from location: Int) -> Int {
+        var location = location
+        while location > 0, !isWordCharacter(text.character(at: location - 1)) {
+            location -= 1
+        }
+        while location > 0, isWordCharacter(text.character(at: location - 1)) {
+            location -= 1
+        }
+        return location
+    }
+
+    private static func isWordCharacter(_ character: unichar) -> Bool {
+        (character >= 0x30 && character <= 0x39)
+            || (character >= 0x41 && character <= 0x5A)
+            || (character >= 0x61 && character <= 0x7A)
+            || character == 0x5F
     }
 }
 
@@ -346,7 +356,7 @@ enum AccessoryKeyboard {
     static func handleArmedKey(_ text: String, state: EditorState) -> Bool {
         guard state.textView != nil else { return false }
         let lower = text.lowercased()
-        let engine = state.textView as? EditorEngine.TextView
+        let engine = state.textView
         let shifted = (text != lower)
 
         let command = state.armedAccessoryCommand
@@ -375,8 +385,18 @@ enum AccessoryKeyboard {
     private static func handleCommandKey(
         _ lower: String,
         shifted: Bool,
-        engine: EditorEngine.TextView?
+        engine: PilcrowTextView?
     ) -> Bool {
+        if handleDocumentCommand(lower, shifted: shifted) {
+            return true
+        }
+        if handleEditingCommand(lower, shifted: shifted, engine: engine) {
+            return true
+        }
+        return handleFindCommand(lower, shifted: shifted)
+    }
+
+    private static func handleDocumentCommand(_ lower: String, shifted: Bool) -> Bool {
         switch lower {
         case "s":
             if shifted {
@@ -385,21 +405,38 @@ enum AccessoryKeyboard {
                 CommandActions.saveFile()
             }
             return true
-        case "z":
-            shifted ? CommandActions.redo() : CommandActions.undo()
-            return true
+        case "t": shifted ? CommandActions.reopenLastClosedTab() : CommandActions.newTab()
+        case "n": CommandActions.newWindow()
+        case "w": CommandActions.closeActiveTab()
+        default: return false
+        }
+        return true
+    }
+
+    private static func handleEditingCommand(
+        _ lower: String,
+        shifted: Bool,
+        engine: PilcrowTextView?
+    ) -> Bool {
+        switch lower {
+        case "z": shifted ? CommandActions.redo() : CommandActions.undo()
         case "c":
             copySelection(from: engine)
-            return true
         case "x":
             copySelection(from: engine, clear: true)
-            return true
         case "v":
             pasteAtSelection(into: engine)
-            return true
         case "a":
             engine?.selectAll()
-            return true
+        case "[": CommandActions.outdentSelection()
+        case "]": CommandActions.indentSelection()
+        default: return false
+        }
+        return true
+    }
+
+    private static func handleFindCommand(_ lower: String, shifted: Bool) -> Bool {
+        switch lower {
         case "f":
             if shifted {
                 CommandActions.presentMultiFileSearch()
@@ -407,54 +444,48 @@ enum AccessoryKeyboard {
                 CommandActions.seedFindFromSelection()
                 CommandActions.presentSheet(.findReplace)
             }
-            return true
-        case "g":
-            shifted ? CommandActions.findPrevious() : CommandActions.findNext()
-            return true
-        case "l":
-            CommandActions.presentSheet(.goToLine)
-            return true
-        case "t":
-            shifted ? CommandActions.reopenLastClosedTab() : CommandActions.newTab()
-            return true
-        case "n":
-            CommandActions.newWindow()
-            return true
-        case "w":
-            CommandActions.closeActiveTab()
-            return true
-        case ";":
-            CommandActions.presentCommandPalette()
-            return true
-        case "[":
-            CommandActions.outdentSelection()
-            return true
-        case "]":
-            CommandActions.indentSelection()
-            return true
-        default:
-            return false
+        case "g": shifted ? CommandActions.findPrevious() : CommandActions.findNext()
+        case "l": CommandActions.presentSheet(.goToLine)
+        case ";": CommandActions.presentCommandPalette()
+        default: return false
         }
+        return true
     }
 
-    private static func handleControlKey(_ lower: String, engine: EditorEngine.TextView?) -> Bool {
+    private static func handleControlKey(_ lower: String, engine: PilcrowTextView?) -> Bool {
+        if handleControlEditingKey(lower) {
+            return true
+        }
+        return handleControlNavigationKey(lower, engine: engine)
+    }
+
+    private static func handleControlEditingKey(_ lower: String) -> Bool {
         switch lower {
         case "k": CommandActions.deleteToEndOfLine();       return true
         case "t": CommandActions.transposeCharacters();     return true
         case "j": CommandActions.joinLines();               return true
-        case "a": CommandActions.smartMoveToLineStart();    return true
-        case "e": CaretMover.moveToLineEnd(in: engine);     return true
-        case "f": CaretMover.move(in: engine, by: 1);       return true
-        case "b": CaretMover.move(in: engine, by: -1);      return true
-        case "n": CaretMover.moveCursor(in: engine, byLines: 1);  return true
-        case "p": CaretMover.moveCursor(in: engine, byLines: -1); return true
         case "d": CommandActions.deleteWordForward();       return true
         case "h": CommandActions.deleteWordBackward();      return true
         default:  return false
         }
     }
 
-    private static func handleOptionKey(_ lower: String, engine: EditorEngine.TextView?) -> Bool {
+    private static func handleControlNavigationKey(
+        _ lower: String,
+        engine: PilcrowTextView?
+    ) -> Bool {
+        switch lower {
+        case "a": CommandActions.smartMoveToLineStart();    return true
+        case "e": CaretMover.moveToLineEnd(in: engine);     return true
+        case "f": CaretMover.move(in: engine, by: 1);       return true
+        case "b": CaretMover.move(in: engine, by: -1);      return true
+        case "n": CaretMover.moveCursor(in: engine, byLines: 1);  return true
+        case "p": CaretMover.moveCursor(in: engine, byLines: -1); return true
+        default:  return false
+        }
+    }
+
+    private static func handleOptionKey(_ lower: String, engine: PilcrowTextView?) -> Bool {
         switch lower {
         case "b":
             CaretMover.moveWord(in: engine, forward: false)

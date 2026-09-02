@@ -2,10 +2,9 @@ import Foundation
 
 /// `.fileBrowser` hosts a UIDocumentBrowserViewController inline;
 /// a pick transitions the tab back to `.editor` with the file loaded.
-/// `.launcher` is the canonical "new window / new tab" surface — it
-/// shows templates + unsaved drafts and flips to `.editor` once the
-/// user picks one. Every spawn-a-fresh-tab path lands here so the
-/// user never sees a blank editor with no entry point.
+/// `.launcher` is retained for compatibility with legacy/restored UI
+/// state. Ordinary new windows and tabs now start as blank `.editor`
+/// tabs; templates and recovery have explicit entry points.
 enum TabKind {
     case editor
     case fileBrowser

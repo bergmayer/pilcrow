@@ -76,7 +76,7 @@ final class EditorState {
     /// navigate the history.
     var positionHistory = PositionHistory()
 
-    weak var textView: (any EditorActions)?
+    weak var textView: PilcrowTextView?
 
     /// The loading-overlay Cancel button cancels this; the Task
     /// clears it in its `defer`.

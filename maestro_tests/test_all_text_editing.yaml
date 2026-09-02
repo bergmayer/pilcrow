@@ -1,4 +1,4 @@
-appId: com.palefire.writad
+appId: com.palefire.pilcrow
 name: "All text-editing tasks — single launch, every command"
 ---
 # IMPORTANT: launchApp runs ONCE at the top. Every section below uses

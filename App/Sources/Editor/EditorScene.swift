@@ -2,13 +2,12 @@ import SwiftUI
 import UniformTypeIdentifiers
 import FileEncoding
 import LineEnding
+import UIKit
 
-/// One `EditorSession` per window. Hosts scene-level modifiers
-/// (pickers, sheets, scenePhase lifecycle, bus registrations).
-/// I/O bypasses `DocumentGroup` to dodge the iOS 26.5 simulator
-/// FileProvider FP-1005 bug — see `PlainTextDocument`.
+/// Hosts one editor session and its scene-level presentation state.
 struct EditorScene: View {
 
+    @Binding private var route: EditorRoute?
     @State private var session = EditorSession()
     @Bindable private var bus = AppStateBus.shared
     @Environment(\.scenePhase) private var scenePhase
@@ -17,26 +16,27 @@ struct EditorScene: View {
     @State private var didApplySessionRecord = false
     @State private var sceneUUID: String = ""
     @State private var exportSnapshotBox = ExportSnapshotBox()
+    @State private var persistenceTask: Task<Void, Never>?
     @Bindable private var prefs = AppPreferencesStore.shared
+    @Bindable private var closedWindows = ClosedWindowsStore.shared
 
     @Namespace private var tabSwitcherNS
+
+    init(route: Binding<EditorRoute?>) {
+        self._route = route
+    }
 
     private var document: PlainTextDocument { session.activeTab.document }
     private var state: EditorState { session.activeTab.state }
 
-    /// SwiftUI evaluates `.fileExporter(document:)` on every body
-    /// re-render, not just at Save As time, so the proxy defers this
-    /// O(n) buffer copy + encode until the exporter actually writes.
-    /// Keep the encode pure — an earlier version raced `applyPayload`
-    /// and clobbered freshly-loaded files back to "". `fileWrapper`
-    /// isn't documented to run on the main thread, hence the hop.
+    /// Captures the live buffer when the exporter writes, on the main actor.
     private func exportSnapshotProvider(for tab: TabModel) -> @Sendable () throws -> Data {
         let state = tab.state
         let document = tab.document
         let tabID = tab.id
         let box = exportSnapshotBox
         return {
-            let snapshot: (text: String, data: Data)
+            let snapshot: (sourceText: String, savedText: String, data: Data)
             if Thread.isMainThread {
                 snapshot = try MainActor.assumeIsolated {
                     try Self.liveEncodedSnapshot(state: state, document: document)
@@ -48,7 +48,12 @@ struct EditorScene: View {
                     }
                 }
             }
-            box.store(.init(tabID: tabID, text: snapshot.text, data: snapshot.data))
+            box.store(.init(
+                tabID: tabID,
+                sourceText: snapshot.sourceText,
+                savedText: snapshot.savedText,
+                data: snapshot.data
+            ))
             return snapshot.data
         }
     }
@@ -56,23 +61,27 @@ struct EditorScene: View {
     private static func liveEncodedSnapshot(
         state: EditorState,
         document: PlainTextDocument
-    ) throws -> (text: String, data: Data) {
+    ) throws -> (sourceText: String, savedText: String, data: Data) {
         let liveText = state.textView?.text ?? document.text
         let defaults = UserDefaults.standard
-        let data = try PlainTextDocument.encode(
-            text: liveText,
-            encoding: document.fileEncoding,
+        let savedText = PlainTextDocument.prepareTextForSaving(
+            liveText,
             lineEnding: document.lineEnding,
             trimTrailingWhitespace: defaults.bool(forKey: AppPreferenceKey.trimTrailingWhitespaceOnSave),
-            ensureTrailingNewline: defaults.bool(forKey: AppPreferenceKey.ensureTrailingNewline),
+            ensureTrailingNewline: defaults.bool(forKey: AppPreferenceKey.ensureTrailingNewline)
+        )
+        let data = try PlainTextDocument.encode(
+            text: savedText,
+            encoding: document.fileEncoding,
+            lineEnding: document.lineEnding,
+            trimTrailingWhitespace: false,
+            ensureTrailingNewline: false,
             saveUTF8BOMPref: defaults.bool(forKey: AppPreferenceKey.saveUTF8BOM)
         )
-        return (liveText, data)
+        return (liveText, savedText, data)
     }
 
-    /// OR over (currentEditor, currentSession): a stale currentEditor
-    /// (e.g. pointing at a closed tab) must not collapse the focused
-    /// window's importer bindings into `.constant(false)`.
+    /// Accept either focused-session signal during focus transitions.
     private var isActive: Bool {
         bus.scenes.isActive(state) || bus.scenes.currentSession === session
     }
@@ -121,12 +130,27 @@ struct EditorScene: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) {
+            if isActive,
+               scenePhase == .active,
+               let record = closedWindows.pendingNotice {
+                ClosedWindowRecoveryBanner(
+                    record: record,
+                    onRestore: { restoreClosedWindowInNewScene(record) },
+                    onDismiss: { closedWindows.dismissNotice() }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: closedWindows.noticeRecordID)
         .preferredColorScheme(scenePreferredScheme)
         .focusedSceneValue(\.focusedSession, session)
         .focusedSceneValue(\.presentEditorSheet, SheetPresenter { [session] sheet in
             AppStateBus.shared.scenes.currentSession = session
             AppStateBus.shared.scenes.currentEditor = session.activeTab.state
-            AppStateBus.shared.presentation.presentedSheet = sheet
+            AppStateBus.shared.presentation.present(sheet, owner: session.activeTab.state)
         })
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
@@ -238,16 +262,30 @@ struct EditorScene: View {
                                 "The file was exported, but its originating tab is no longer open."
                             return
                         }
-                        let currentText = target.state.textView?.text ?? target.document.text
+                        var currentText = target.state.textView?.text ?? target.document.text
+                        // Apply save-time formatting to the live buffer only
+                        // if the user did not edit while the exporter was up.
+                        // The replace remains undoable; an Undo after Save
+                        // correctly makes the document dirty again.
+                        if currentText == snapshot.sourceText,
+                           currentText != snapshot.savedText {
+                            if let textView = target.state.textView {
+                                textView.replace(
+                                    NSRange(location: 0, length: (currentText as NSString).length),
+                                    withText: snapshot.savedText
+                                )
+                            }
+                            currentText = snapshot.savedText
+                        }
                         target.document.finishExternalSave(
                             to: url,
-                            savedText: snapshot.text,
+                            savedText: snapshot.savedText,
                             savedData: snapshot.data,
                             currentText: currentText
                         )
                         target.state.text = currentText
                         target.state.fileURL = url
-                        target.state.savedBaselineText = snapshot.text
+                        target.state.savedBaselineText = snapshot.savedText
                         target.state.fileEncoding = target.document.fileEncoding
                         target.state.lineEnding = target.document.lineEnding
                         target.state.languageIdentifier = LanguageRegistry.identifier(for: url)
@@ -304,7 +342,8 @@ struct EditorScene: View {
                 // the async load path: errors surface via
                 // openErrorMessage and isLargeFile is recomputed.
                 guard isActive, let url = document.fileURL else { return }
-                openURL(url)
+                let tab = session.activeTab
+                DocumentWorkflow.revert(url, in: tab)
             }
     }
 
@@ -354,7 +393,7 @@ struct EditorScene: View {
                 tabContentOverride: AnyView(
                     FileBrowserTabContent(
                         onPick: { adoptPickedFileIntoActiveTab($0) },
-                        onCancel: { session.activeTab.kind = .launcher }
+                        onCancel: { session.activeTab.kind = .editor }
                     )
                 )
             )
@@ -372,6 +411,7 @@ struct EditorScene: View {
         NewDocumentLauncherView(
             onPickTemplate: { adoptTemplateIntoActiveTab($0) },
             onPickDraft: { adoptDraftIntoActiveTab($0) },
+            onRestoreClosedWindow: { restoreClosedWindowFromLauncher($0) },
             onPickOpenFile: { session.activeTab.kind = .fileBrowser },
             onPickClipboard: { adoptClipboardIntoActiveTab($0) },
             isWindowScopeLauncher: session.tabs.count == 1,
@@ -409,16 +449,12 @@ struct EditorScene: View {
 
     private func adoptTemplateIntoActiveTab(_ template: TemplateRecord) {
         let tab = session.activeTab
-        let body = TemplatesStore.shared.loadContent(template) ?? ""
-        tab.document.text = body
-        tab.document.fileURL = nil
-        tab.document.isDirty = !body.isEmpty
-        tab.state.text = body
-        tab.state.fileURL = nil
-        tab.state.savedBaselineText = ""
-        tab.state.languageIdentifier = LanguageRegistry.identifier(for: template.url)
+        TemplateWorkflow.apply(
+            template,
+            document: tab.document,
+            state: tab.state
+        )
         tab.kind = .editor
-        tab.state.requestEditorFocus()
     }
 
     /// Adopts a draft into the active tab. The draft file stays in
@@ -435,7 +471,7 @@ struct EditorScene: View {
                     bus.presentation.sourceStaleCheck = staleCheck
                 }
             } catch is CancellationError {
-                // The scene went away while an iCloud draft was loading.
+                // The scene went away while a recovery snapshot was loading.
             } catch {
                 bus.presentation.openErrorMessage = error.localizedDescription
             }
@@ -443,8 +479,12 @@ struct EditorScene: View {
     }
 
     @discardableResult
-    static func adoptDraft(_ draft: DraftRecord, into tab: TabModel) async throws -> SourceStaleCheck? {
-        try await DraftRecoveryWorkflow.adopt(draft, into: tab)
+    static func adoptDraft(
+        _ draft: DraftRecord,
+        into tab: TabModel,
+        store: DraftsStore = .shared
+    ) async throws -> SourceStaleCheck? {
+        try await DraftRecoveryWorkflow.adopt(draft, into: tab, store: store)
     }
 
     /// Stable across tab switches. Keyed off active tab id earlier,
@@ -517,9 +557,55 @@ struct EditorScene: View {
                 openWindow(id: SceneID.editor.rawValue)
             }
         }
+        if let route, case .restoreClosedWindow(let archivedID) = route {
+            self.route = nil
+            if let archived = closedWindows.record(id: archivedID) {
+                restoreClosedWindow(archived)
+                return
+            }
+            bus.presentation.openErrorMessage =
+                "That recoverable window is no longer available."
+        }
         if let record = SessionsStore.shared.consumePendingRestore() {
             SessionRestore.apply(record, to: session)
         }
+    }
+
+    /// A launcher-only window can be replaced in place. A launcher tab in a
+    /// window that already contains other work opens the archive separately,
+    /// preserving both the current window and the archived tab group.
+    private func restoreClosedWindowFromLauncher(_ archived: ClosedWindowRecord) {
+        if session.tabs.count == 1 {
+            restoreClosedWindow(archived)
+        } else {
+            restoreClosedWindowInNewScene(archived)
+        }
+    }
+
+    private func restoreClosedWindowInNewScene(_ archived: ClosedWindowRecord) {
+        closedWindows.dismissNotice()
+        guard let openEditorWindow = bus.scenes.openEditorWindow else {
+            bus.presentation.openErrorMessage =
+                "A new window isn't available yet. The recovered window was kept so you can try again."
+            return
+        }
+        openEditorWindow(.restoreClosedWindow(archived.id))
+    }
+
+    /// Save the replacement open-session record before removing recovery
+    /// metadata. This keeps every draft filename protected without a gap
+    /// while the async file/draft population work begins.
+    private func restoreClosedWindow(_ archived: ClosedWindowRecord) {
+        let replacement = archived.sessionRecord(
+            sceneUUID: sceneUUID,
+            launchID: SessionsStore.shared.currentLaunchID,
+            persistentIdentifier: SessionsStore.shared.persistentIdentifier(
+                forSceneUUID: sceneUUID
+            )
+        )
+        SessionsStore.shared.save(replacement)
+        SessionRestore.apply(replacement, to: session)
+        closedWindows.completeRestore(archived.id)
     }
 
     /// Snapshots current tabs (file bookmarks + draft refs + active
@@ -527,12 +613,34 @@ struct EditorScene: View {
     /// transition so a force-quit picks up the latest state.
     private func persistSessionRecord() {
         guard !sceneUUID.isEmpty, !session.isClosingWindow else { return }
-        DraftsStore.shared.withCapEnforcementSuspended {
+        let previous = persistenceTask
+        let backgroundTask = UIApplication.shared.beginBackgroundTask(
+            withName: "Persist editor recovery"
+        )
+        persistenceTask = Task { @MainActor in
+            _ = await previous?.value
+            defer {
+                if backgroundTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(backgroundTask)
+                }
+            }
+            do {
+                try await persistSessionRecordNow()
+            } catch {
+                bus.presentation.openErrorMessage =
+                    "Couldn't preserve this window: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func persistSessionRecordNow() async throws {
+        guard !sceneUUID.isEmpty, !session.isClosingWindow else { return }
+        try await DraftsStore.shared.withCapEnforcementSuspended {
             for tab in session.tabs where tab.document.isDirty {
                 if let live = tab.state.textView?.text {
                     tab.document.text = live
                 }
-                tab.document.autoSave(commitDraft: true)
+                try await tab.document.commitRecoverySnapshot()
             }
         }
         // Empty windows (every tab without fileURL or draftURL) are
@@ -608,9 +716,61 @@ struct EditorScene: View {
     }
 }
 
+private struct ClosedWindowRecoveryBanner: View {
+    let record: ClosedWindowRecord
+    let onRestore: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "rectangle.stack.badge.clock")
+                .font(.title3)
+                .foregroundStyle(.tint)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Window closed")
+                    .font(.subheadline.weight(.semibold))
+                Text(recoveryMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("Restore", action: onRestore)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Dismiss recovery notice")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.14), radius: 12, y: 4)
+        .frame(maxWidth: 620)
+    }
+
+    private var recoveryMessage: String {
+        let noun = record.dirtyTabCount == 1 ? "tab" : "tabs"
+        return "\(record.dirtyTabCount) unsaved \(noun) kept on this iPad."
+    }
+}
+
 private struct ExportSnapshot: Sendable {
     let tabID: UUID
-    let text: String
+    let sourceText: String
+    let savedText: String
     let data: Data
 }
 

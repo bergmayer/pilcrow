@@ -1,5 +1,5 @@
 import XCTest
-@testable import Writad
+@testable import Pilcrow
 
 final class TransformationsTests: XCTestCase {
 
@@ -212,5 +212,58 @@ final class TransformationsTests: XCTestCase {
             Transformations.wordWrap("supercalifragilistic and tiny", to: 8, separator: "\n"),
             "supercalifragilistic\nand tiny"
         )
+    }
+
+    // MARK: - Markdown preview
+
+    func test_markdownPreview_rendersEachSupportedBlockKindInOrder() {
+        let source = """
+        # Title
+
+        A **bold** paragraph.
+
+        - one
+        - two
+
+        > quoted
+
+        ```
+        let value = 1
+        ```
+        """
+        let expected = """
+        <h1>Title</h1>
+        <p>A <strong>bold</strong> paragraph.</p>
+        <ul>
+        <li>one</li>
+        <li>two</li>
+        </ul>
+        <blockquote>quoted<br>
+        </blockquote>
+        <pre><code>let value = 1
+        </code></pre>
+
+        """
+
+        XCTAssertEqual(SwiftMarkdown.render(source), expected)
+    }
+
+    func test_markdownPreview_extractsFootnotesBeforeRenderingBody() {
+        let source = """
+        Before[^note].
+
+        [^note]: first line
+            continuation
+        """
+        let expected = """
+        <p>Before<sup id="fnref-note"><a href="#fn-note">note</a></sup>.</p>
+        <div class="footnotes"><hr><ol>
+        <li id="fn-note">first line
+        continuation <a href="#fnref-note">↩</a></li>
+        </ol></div>
+
+        """
+
+        XCTAssertEqual(SwiftMarkdown.render(source), expected)
     }
 }

@@ -250,6 +250,17 @@ enum SwiftMarkdown {
         }
 
         mutating func parse() {
+            extractFootnotes()
+            parseBlocks()
+
+            if !footnotes.isEmpty {
+                appendFootnotes()
+            }
+        }
+
+        /// Pull definitions out before parsing the document body so references
+        /// can resolve regardless of where their definitions appear.
+        private mutating func extractFootnotes() {
             // Pass 1: lift footnote definitions out so pass 2 can
             // wire references to them and they don't leak inline.
             var bodyLines: [String] = []
@@ -279,37 +290,38 @@ enum SwiftMarkdown {
             }
             lines = bodyLines
             index = 0
+        }
 
-            // Pass 2: block-level parse.
+        private mutating func parseBlocks() {
             while index < lines.count {
                 let line = lines[index]
                 if line.trimmingCharacters(in: .whitespaces).isEmpty {
                     index += 1
                     continue
                 }
-                if line.hasPrefix("```") || line.hasPrefix("~~~") {
-                    consumeFencedCodeBlock(fence: String(line.prefix(3)))
-                } else if isHorizontalRule(line) {
-                    html += "<hr>\n"
-                    index += 1
-                } else if let header = headerMatch(line) {
-                    html += "<h\(header.level)>\(inline(header.text))</h\(header.level)>\n"
-                    index += 1
-                } else if line.hasPrefix("> ") || line == ">" {
-                    consumeBlockquote()
-                } else if isUnorderedListItem(line) {
-                    consumeList(ordered: false)
-                } else if isOrderedListItem(line) {
-                    consumeList(ordered: true)
-                } else if line.hasPrefix("    ") || line.hasPrefix("\t") {
-                    consumeIndentedCodeBlock()
-                } else {
-                    consumeParagraph()
-                }
+                consumeBlock(startingWith: line)
             }
+        }
 
-            if !footnotes.isEmpty {
-                appendFootnotes()
+        private mutating func consumeBlock(startingWith line: String) {
+            if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                consumeFencedCodeBlock(fence: String(line.prefix(3)))
+            } else if isHorizontalRule(line) {
+                html += "<hr>\n"
+                index += 1
+            } else if let header = headerMatch(line) {
+                html += "<h\(header.level)>\(inline(header.text))</h\(header.level)>\n"
+                index += 1
+            } else if line.hasPrefix("> ") || line == ">" {
+                consumeBlockquote()
+            } else if isUnorderedListItem(line) {
+                consumeList(ordered: false)
+            } else if isOrderedListItem(line) {
+                consumeList(ordered: true)
+            } else if line.hasPrefix("    ") || line.hasPrefix("\t") {
+                consumeIndentedCodeBlock()
+            } else {
+                consumeParagraph()
             }
         }
 
@@ -371,16 +383,23 @@ enum SwiftMarkdown {
             var paragraph: [String] = []
             while index < lines.count {
                 let line = lines[index]
-                if line.trimmingCharacters(in: .whitespaces).isEmpty { break }
-                if isHorizontalRule(line) { break }
-                if headerMatch(line) != nil { break }
-                if line.hasPrefix("> ") || line == ">" { break }
-                if isUnorderedListItem(line) || isOrderedListItem(line) { break }
-                if line.hasPrefix("```") || line.hasPrefix("~~~") { break }
+                if beginsBlock(line) { break }
                 paragraph.append(line)
                 index += 1
             }
             html += "<p>\(inline(paragraph.joined(separator: " ")))</p>\n"
+        }
+
+        private func beginsBlock(_ line: String) -> Bool {
+            line.trimmingCharacters(in: .whitespaces).isEmpty
+                || isHorizontalRule(line)
+                || headerMatch(line) != nil
+                || line.hasPrefix("> ")
+                || line == ">"
+                || isUnorderedListItem(line)
+                || isOrderedListItem(line)
+                || line.hasPrefix("```")
+                || line.hasPrefix("~~~")
         }
 
         private mutating func appendFootnotes() {

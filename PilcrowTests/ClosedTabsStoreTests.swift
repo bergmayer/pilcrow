@@ -1,5 +1,5 @@
 import XCTest
-@testable import Writad
+@testable import Pilcrow
 
 @MainActor
 final class ClosedTabsStoreTests: XCTestCase {
@@ -11,11 +11,11 @@ final class ClosedTabsStoreTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        suiteName = "writad-closed-tabs-test-\(UUID().uuidString)"
+        suiteName = "pilcrow-closed-tabs-test-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
         storageDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("writad-closed-tabs-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("pilcrow-closed-tabs-\(UUID().uuidString)", isDirectory: true)
         store = ClosedTabsStore(defaults: defaults, storageDirectory: storageDirectory)
     }
 

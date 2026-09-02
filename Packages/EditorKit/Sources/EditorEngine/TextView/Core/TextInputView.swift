@@ -327,6 +327,8 @@ final class TextInputView: UIView, UITextInput {
                 selectionRectService.textContainerInset = newValue
                 contentSizeService.textContainerInset = newValue
                 layoutManager.textContainerInset = newValue
+                contentSizeService.invalidateContentSize()
+                invalidateLines()
                 layoutManager.setNeedsLayout()
                 setNeedsLayout()
             }
@@ -551,9 +553,6 @@ final class TextInputView: UIView, UITextInput {
             }
         }
     }
-    var viewHierarchyContainsCaret: Bool {
-        textSelectionView?.subviews.count == 1
-    }
     var lineEndings: LineEnding = .lf
     private(set) var isRestoringPreviouslyDeletedText = false
 
@@ -592,13 +591,6 @@ final class TextInputView: UIView, UITextInput {
     private var floatingCaretView: FloatingCaretView?
     private var insertionPointColorBeforeFloatingBegan: UIColor = .label
     private var maximumLeadingCharacterPairComponentLength = 0
-    private var textSelectionView: UIView? {
-        if let klass = NSClassFromString("UITextSelectionView") {
-            return subviews.first { $0.isKind(of: klass) }
-        } else {
-            return nil
-        }
-    }
     private var hasPendingFullLayout = false
     private let editMenuController = EditMenuController()
     private var notifyInputDelegateAboutSelectionChangeInLayoutSubviews = false
@@ -745,18 +737,6 @@ final class TextInputView: UIView, UITextInput {
         selectedRange = NSRange(location: 0, length: string.length)
     }
 
-    /// When autocorrection is enabled and the user tap on a misspelled word, UITextInteraction will present
-    /// a UIMenuController with suggestions for the correct spelling of the word. Selecting a suggestion will
-    /// cause UITextInteraction to call the non-existing -replace(_:) function and pass an instance of the private
-    /// UITextReplacement type as parameter. We can't make autocorrection work properly without using private API.
-    @objc func replace(_ obj: NSObject) {
-        if let replacementText = obj.value(forKey: "_repl" + "Ttnemeca".reversed() + "ext") as? String {
-            if let indexedRange = obj.value(forKey: "_r" + "gna".reversed() + "e") as? IndexedRange {
-                replace(indexedRange, withText: replacementText)
-            }
-        }
-    }
-
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(copy(_:)) {
             if let selectedTextRange = selectedTextRange {
@@ -774,9 +754,7 @@ final class TextInputView: UIView, UITextInput {
             return isEditing && UIPasteboard.general.hasStrings
         } else if action == #selector(selectAll(_:)) {
             return true
-        } else if action == #selector(replace(_:)) {
-            return true
-        } else if action == NSSelectorFromString("replaceTextInSelectedHighlightedRange") {
+        } else if action == #selector(replaceTextInSelectedHighlightedRange) {
             if let selectedRange = selectedRange, let highlightedRange = highlightedRange(for: selectedRange) {
                 return delegate?.textInputView(self, canReplaceTextIn: highlightedRange) ?? false
             } else {
@@ -1106,11 +1084,11 @@ extension TextInputView {
     }
 
     private func updateCaretColor() {
-        // Removing the UITextSelectionView and re-adding it forces it to query the insertion point color.
-        if let textSelectionView = textSelectionView {
-            textSelectionView.removeFromSuperview()
-            addSubview(textSelectionView)
-        }
+        // `tintColor` is UIKit's supported customization point for the
+        // caret and selection handles. Avoid reaching into private
+        // UITextInteraction subviews to force a refresh.
+        tintColor = insertionPointColor
+        setNeedsLayout()
     }
 }
 
@@ -1120,11 +1098,28 @@ extension TextInputView {
         guard let indexedPosition = position as? IndexedPosition else {
             fatalError("Expected position to be of type \(IndexedPosition.self)")
         }
+        // UIKit may ask for a caret rect outside the currently visible
+        // viewport (for example while restoring a selection or serving an
+        // accessibility request). Ensure the fragment tree covers that
+        // position before querying it; a partially typeset tree cannot
+        // safely answer character-location lookups.
+        ensureLayoutForCaret(at: indexedPosition.index)
         return caretRectService.caretRect(at: indexedPosition.index, allowMovingCaretToNextLineFragment: true)
     }
 
     func caretRect(at location: Int) -> CGRect {
-        caretRectService.caretRect(at: location, allowMovingCaretToNextLineFragment: true)
+        ensureLayoutForCaret(at: location)
+        return caretRectService.caretRect(at: location, allowMovingCaretToNextLineFragment: true)
+    }
+
+    private func ensureLayoutForCaret(at location: Int) {
+        let safeLocation = min(max(location, 0), string.length)
+        guard let line = lineManager.line(containingCharacterAt: safeLocation) else { return }
+        let lineLocalLocation = safeLocation - line.location
+        let lineController = lineControllerStorage.getOrCreateLineController(for: line)
+        if lineController.needsTypesetting(to: lineLocalLocation) {
+            layoutLines(toLocation: safeLocation)
+        }
     }
 
     func firstRect(for range: UITextRange) -> CGRect {
@@ -1206,7 +1201,7 @@ extension TextInputView {
         }
         replaceText(in: deleteRange, with: "", selectedRangeAfterUndo: selectedRangeAfterUndo)
         // Sending selection changed without calling the input delegate directly. This ensures that both inputting Korean letters and deleting entire words with Option+Backspace works properly.
-        sendSelectionChangedToTextSelectionView()
+        notifyUIKitOfSelectionChange()
         if isDeletingMultipleCharacters {
             timedUndoManager.endUndoGrouping()
         }
@@ -1396,10 +1391,10 @@ extension TextInputView {
         }
     }
 
-    private func sendSelectionChangedToTextSelectionView() {
-        // The only way I've found to get the selection change to be reflected properly while still supporting Korean, Chinese, and deleting words with Option+Backspace is to call a private API in some cases. However, as pointed out by Alexander Blach in the following PR, there is another workaround to the issue.
-        // When passing nil to the input delete, the text selection is update but the text input ignores it.
-        // Even the Swift Playgrounds app does not get this right for all languages in all cases, so there seems to be some workarounds needed to due bugs in internal classes in UIKit that communicate with instances of UITextInput.
+    private func notifyUIKitOfSelectionChange() {
+        // Passing nil asks UIKit to refresh its selection presentation
+        // without making it treat the callback as another text mutation.
+        // This preserves marked-text composition and Option-Delete behavior.
         inputDelegate?.selectionDidChange(nil)
     }
 }

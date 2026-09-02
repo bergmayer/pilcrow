@@ -15,10 +15,16 @@ struct EditorObserversModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onChange(of: state.fileEncoding) { _, newValue in
+                guard document.fileEncoding != newValue else { return }
                 document.fileEncoding = newValue
+                document.isDirty = true
+                document.bufferRevision &+= 1
             }
             .onChange(of: state.lineEnding) { _, newValue in
+                guard document.lineEnding != newValue else { return }
                 document.lineEnding = newValue
+                document.isDirty = true
+                document.bufferRevision &+= 1
             }
             // `bufferRevision` is a UInt64 bumped per edit — O(1) to
             // observe. Watching `document.text` would cascade the whole

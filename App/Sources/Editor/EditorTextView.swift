@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 import EditorEngine
-import WritadSyntax
+import PilcrowSyntax
 
 /// The engine's `TextView` is the buffer's source of truth. The
 /// coordinator bumps `document.bufferRevision` per keystroke;
@@ -18,8 +18,8 @@ struct EditorTextView: UIViewRepresentable {
         colorScheme == .dark ? .dark : .light
     }
 
-    func makeUIView(context: Context) -> EditorEngine.TextView {
-        let textView = EditorEngine.TextView()
+    func makeUIView(context: Context) -> PilcrowTextView {
+        let textView = PilcrowTextView()
         textView.editorDelegate = context.coordinator
         let initialThemeKey = EditorTextViewCoordinator.ThemeCacheKey(
             name: state.themeName,
@@ -89,98 +89,130 @@ struct EditorTextView: UIViewRepresentable {
         return textView
     }
 
-    func updateUIView(_ textView: EditorEngine.TextView, context: Context) {
-        // Only push `document.text` on external writes (load,
-        // Revert, restore, Save-As re-decode). `lastPushedDocumentText`
-        // is the cache that skips the O(n) compare-on-every-render
-        // that froze typing on big files.
-        if context.coordinator.lastPushedDocumentText != document.text {
-            context.coordinator.lastPushedDocumentText = document.text
-            if textView.text != document.text {
-                textView.text = document.text
-            }
-        }
+    func updateUIView(_ textView: PilcrowTextView, context: Context) {
+        synchronizeDocumentText(with: textView, coordinator: context.coordinator)
         applyTypingPreferences(to: textView)
         applyViewSettings(to: textView)
         applyOverscroll(to: textView)
+        synchronizeTheme(with: textView, coordinator: context.coordinator)
+        applyIndentStrategy(to: textView)
+        applyCharacterPairs(to: textView)
+        synchronizeLanguage(with: textView, coordinator: context.coordinator)
+        context.coordinator.refreshFoldableRegions(textView)
+        applyFocusRequestIfNeeded(to: textView, context: context)
+        context.coordinator.bookmarkOverlay?.bookmarks = state.bookmarks
+        refreshChangeHistoryOverlay(for: textView, coordinator: context.coordinator)
+    }
+
+    /// Only pushes external document writes (load, Revert, restore, or a
+    /// Save-As re-decode). The cache avoids an O(n) compare on every render.
+    private func synchronizeDocumentText(
+        with textView: PilcrowTextView,
+        coordinator: EditorTextViewCoordinator
+    ) {
+        guard coordinator.lastPushedDocumentText != document.text else { return }
+        coordinator.lastPushedDocumentText = document.text
+        if textView.text != document.text {
+            textView.text = document.text
+        }
+    }
+
+    private func synchronizeTheme(
+        with textView: PilcrowTextView,
+        coordinator: EditorTextViewCoordinator
+    ) {
         let themeKey = EditorTextViewCoordinator.ThemeCacheKey(
             name: state.themeName,
             font: state.font,
             fontSize: currentFontSize(),
             style: resolvedStyle == .dark ? .dark : .light
         )
-        if context.coordinator.themeCacheKey != themeKey {
-            let resolved = AppTheme.current(
-                themeKey.name,
-                font: themeKey.font,
-                fontSize: themeKey.fontSize,
-                userInterfaceStyle: themeKey.style
-            )
-            textView.theme = resolved
-            textView.backgroundColor = (resolved as? EditorBackgroundProviding)?
-                .editorBackgroundColor ?? .systemBackground
-            context.coordinator.themeCacheKey = themeKey
+        guard coordinator.themeCacheKey != themeKey else { return }
+        let resolved = AppTheme.current(
+            themeKey.name,
+            font: themeKey.font,
+            fontSize: themeKey.fontSize,
+            userInterfaceStyle: themeKey.style
+        )
+        textView.theme = resolved
+        textView.backgroundColor = (resolved as? EditorBackgroundProviding)?
+            .editorBackgroundColor ?? .systemBackground
+        coordinator.themeCacheKey = themeKey
+    }
+
+    private func synchronizeLanguage(
+        with textView: PilcrowTextView,
+        coordinator: EditorTextViewCoordinator
+    ) {
+        guard coordinator.currentLanguageIdentifier != state.languageIdentifier else { return }
+        applyLanguage(
+            to: textView,
+            identifier: state.languageIdentifier,
+            coordinator: coordinator
+        )
+    }
+
+    private func refreshChangeHistoryOverlay(
+        for textView: PilcrowTextView,
+        coordinator: EditorTextViewCoordinator
+    ) {
+        guard let overlay = coordinator.changeHistoryOverlay else { return }
+        guard let currentText = changeHistoryText(from: textView) else {
+            clearChangeHistoryOverlay(overlay, coordinator: coordinator)
+            return
         }
-        applyIndentStrategy(to: textView)
-        applyCharacterPairs(to: textView)
-        if context.coordinator.currentLanguageIdentifier != state.languageIdentifier {
-            applyLanguage(to: textView, identifier: state.languageIdentifier, coordinator: context.coordinator)
+
+        let baselineText = state.savedBaselineText
+        guard coordinator.changeHistoryBaselineCache != baselineText
+                || coordinator.changeHistoryCurrentCache != currentText
+        else { return }
+
+        coordinator.overlayRefreshTask?.cancel()
+        coordinator.overlayRefreshTask = Task { @MainActor [weak coordinator, weak overlay] in
+            try? await Task.sleep(for: Timing.changeHistoryOverlayDebounce)
+            if Task.isCancelled { return }
+            guard let coordinator, let overlay else { return }
+            if coordinator.changeHistoryBaselineCache != baselineText {
+                coordinator.changeHistoryBaselineCache = baselineText
+                overlay.baseline = baselineText.components(separatedBy: "\n")
+            }
+            if coordinator.changeHistoryCurrentCache != currentText {
+                coordinator.changeHistoryCurrentCache = currentText
+                overlay.current = currentText.components(separatedBy: "\n")
+            }
         }
-        context.coordinator.refreshFoldableRegions(textView)
-        applyFocusRequestIfNeeded(to: textView, context: context)
-        context.coordinator.bookmarkOverlay?.bookmarks = state.bookmarks
+    }
+
+    private func changeHistoryText(from textView: PilcrowTextView) -> String? {
         // Gutter gated on pref + byte ceiling
         // (`changeHistoryGutterByteLimit` — per-line diff +
         // caretRect lookups slow past 100KB) + cache short-circuit.
         // Pref / large-file checks run BEFORE touching `textView.text`
         // — the getter is an O(n) buffer copy per render.
-        let coord = context.coordinator
-        var gutterText: String?
-        if state.showChangeHistoryGutter, !state.isLargeFile {
-            let candidate = textView.text
-            if candidate.utf16.count <= Timing.changeHistoryGutterByteLimit {
-                gutterText = candidate
-            }
-        }
-        if let overlay = coord.changeHistoryOverlay {
-            if gutterText == nil {
-                // Drop stale bars; resetting caches lets a re-enable
-                // render fresh.
-                coord.overlayRefreshTask?.cancel()
-                if !overlay.baseline.isEmpty || !overlay.current.isEmpty {
-                    overlay.baseline = []
-                    overlay.current = []
-                    coord.changeHistoryBaselineCache = nil
-                    coord.changeHistoryCurrentCache = nil
-                }
-            } else if let currentText = gutterText {
-                let baselineText = state.savedBaselineText
-                if coord.changeHistoryBaselineCache != baselineText ||
-                   coord.changeHistoryCurrentCache != currentText {
-                    coord.overlayRefreshTask?.cancel()
-                    coord.overlayRefreshTask = Task { @MainActor [weak coord, weak overlay] in
-                        try? await Task.sleep(for: Timing.changeHistoryOverlayDebounce)
-                        if Task.isCancelled { return }
-                        guard let coord, let overlay else { return }
-                        if coord.changeHistoryBaselineCache != baselineText {
-                            coord.changeHistoryBaselineCache = baselineText
-                            overlay.baseline = baselineText.components(separatedBy: "\n")
-                        }
-                        if coord.changeHistoryCurrentCache != currentText {
-                            coord.changeHistoryCurrentCache = currentText
-                            overlay.current = currentText.components(separatedBy: "\n")
-                        }
-                    }
-                }
-            }
-        }
+        guard state.showChangeHistoryGutter, !state.isLargeFile else { return nil }
+        let candidate = textView.text
+        guard candidate.utf16.count <= Timing.changeHistoryGutterByteLimit else { return nil }
+        return candidate
+    }
+
+    private func clearChangeHistoryOverlay(
+        _ overlay: ChangeHistoryGutterOverlay,
+        coordinator: EditorTextViewCoordinator
+    ) {
+        // Drop stale bars; resetting caches lets a re-enable render fresh.
+        coordinator.overlayRefreshTask?.cancel()
+        guard !overlay.baseline.isEmpty || !overlay.current.isEmpty else { return }
+        overlay.baseline = []
+        overlay.current = []
+        coordinator.changeHistoryBaselineCache = nil
+        coordinator.changeHistoryCurrentCache = nil
     }
 
     func makeCoordinator() -> EditorTextViewCoordinator {
         EditorTextViewCoordinator(document: document, state: state)
     }
 
-    private func applyFocusRequestIfNeeded(to textView: EditorEngine.TextView, context: Context) {
+    private func applyFocusRequestIfNeeded(to textView: PilcrowTextView, context: Context) {
         let requestID = state.editorFocusRequestID
         guard requestID != 0, context.coordinator.handledFocusRequestID != requestID else { return }
         context.coordinator.handledFocusRequestID = requestID
@@ -194,7 +226,7 @@ struct EditorTextView: UIViewRepresentable {
 
     // MARK: - Settings
 
-    private func applyTypingPreferences(to textView: EditorEngine.TextView) {
+    private func applyTypingPreferences(to textView: PilcrowTextView) {
         textView.autocorrectionType = state.autoCorrect ? .yes : .no
         textView.autocapitalizationType = state.autoCapitalize ? .sentences : .none
         textView.smartQuotesType = state.smartQuotes ? .yes : .no
@@ -205,7 +237,7 @@ struct EditorTextView: UIViewRepresentable {
         textView.keyboardType = .default
     }
 
-    private func applyViewSettings(to textView: EditorEngine.TextView) {
+    private func applyViewSettings(to textView: PilcrowTextView) {
         textView.showLineNumbers = state.showLineNumbers
         textView.isLineWrappingEnabled = state.wrapLines
 
@@ -221,41 +253,21 @@ struct EditorTextView: UIViewRepresentable {
 
         textView.lineHeightMultiplier  = CGFloat(state.lineHeight)
         textView.lineSelectionDisplayType = state.highlightCurrentLine ? .line : .disabled
+        textView.applyLineEndingRawValue(state.lineEnding.rawValue)
 
-        applyPageGuideWrap(to: textView)
-    }
-
-    private func applyPageGuideWrap(to textView: EditorEngine.TextView) {
-        guard state.wrapLines, state.pageGuideColumn > 0 else {
-            if textView.textContainerInset.right != 0 {
-                var inset = textView.textContainerInset
-                inset.right = 0
-                textView.textContainerInset = inset
-            }
-            return
-        }
-        let font = state.font.uiFont(size: CGFloat(state.fontSize))
-        // Space-width probes the monospaced advance without
-        // attributing a string the way `UIFont.advance(of:)` would.
-        let probe = " " as NSString
-        let charWidth = probe.size(withAttributes: [.font: font]).width
-        guard charWidth > 0 else { return }
-        let desiredColumnWidth = CGFloat(state.pageGuideColumn) * charWidth
-        let scrollWidth = textView.frame.width
-        let gutterWidth = textView.gutterWidth
-        let leftInset = textView.textContainerInset.left
-        let available = scrollWidth - gutterWidth - leftInset
-        let neededRightInset = max(0, available - desiredColumnWidth)
-        if abs(textView.textContainerInset.right - neededRightInset) > 0.5 {
+        // A page guide is a visual ruler, not a second wrapping width.
+        // Wrapping remains tied to the viewport so resizing an iPad window
+        // cannot leave stale, clipped line fragments behind.
+        if textView.textContainerInset.right != 0 {
             var inset = textView.textContainerInset
-            inset.right = neededRightInset
+            inset.right = 0
             textView.textContainerInset = inset
         }
     }
 
     /// Ten lines of `contentInset.bottom` cushion so the final
     /// line doesn't pin to the window edge.
-    private func applyOverscroll(to textView: EditorEngine.TextView) {
+    private func applyOverscroll(to textView: PilcrowTextView) {
         let font = state.font.uiFont(size: CGFloat(state.fontSize))
         let perLine = font.lineHeight * CGFloat(state.lineHeight)
         let target: CGFloat = state.overscroll ? perLine * 10 : 0
@@ -264,18 +276,18 @@ struct EditorTextView: UIViewRepresentable {
         }
     }
 
-    private func applyIndentStrategy(to textView: EditorEngine.TextView) {
+    private func applyIndentStrategy(to textView: PilcrowTextView) {
         textView.indentStrategy = state.usesTabs
             ? .tab(length: state.indentWidth)
             : .space(length: state.indentWidth)
     }
 
-    private func applyCharacterPairs(to textView: EditorEngine.TextView) {
+    private func applyCharacterPairs(to textView: PilcrowTextView) {
         textView.characterPairs = state.insertCharacterPairs ? Self.commonPairs : []
     }
 
     private func applyLanguage(
-        to textView: EditorEngine.TextView,
+        to textView: PilcrowTextView,
         identifier: LanguageIdentifier,
         coordinator: EditorTextViewCoordinator
     ) {
@@ -312,9 +324,9 @@ private struct BasicCharacterPair: EditorEngine.CharacterPair {
     let trailing: String
 }
 
-// MARK: - EditorActions conformance
+// MARK: - Editor commands
 
-extension EditorEngine.TextView: EditorActions {
+extension PilcrowTextView {
 
     func focusForEditing() {
         _ = becomeFirstResponder()
@@ -599,7 +611,31 @@ extension EditorEngine.TextView: EditorActions {
     /// Remembers ignored words so the highlighter doesn't immediately
     /// re-flag them — UITextChecker's ignoreWord is per-checker but
     /// doesn't filter the highlight pass.
-    private static var ignoredWords: Set<String> = []
+    /// Follow the active keyboard when possible, then the user's preferred
+    /// languages. UITextChecker uses underscore locale identifiers on some
+    /// OS versions and hyphenated identifiers on others, so match both the
+    /// full locale and its language prefix.
+    private var spellCheckingLanguage: String {
+        let available = UITextChecker.availableLanguages
+        let candidates = [textInputMode?.primaryLanguage] + Locale.preferredLanguages.map(Optional.some)
+        for candidate in candidates.compactMap({ $0 }) {
+            let normalized = candidate.replacingOccurrences(of: "-", with: "_")
+            if let exact = available.first(where: {
+                $0.caseInsensitiveCompare(candidate) == .orderedSame
+                    || $0.caseInsensitiveCompare(normalized) == .orderedSame
+            }) {
+                return exact
+            }
+            let language = normalized.split(separator: "_").first?.lowercased()
+            if let language,
+               let regional = available.first(where: {
+                   $0.lowercased().split(separator: "_").first.map(String.init) == language
+               }) {
+                return regional
+            }
+        }
+        return available.first ?? "en_US"
+    }
 
     func jumpToNextMisspelling() {
         let nsText = text as NSString
@@ -609,7 +645,7 @@ extension EditorEngine.TextView: EditorActions {
             range: NSRange(location: 0, length: nsText.length),
             startingAt: start,
             wrap: true,
-            language: "en_US"
+            language: spellCheckingLanguage
         )
         // Skip ranges whose word we've been told to ignore. With
         // wrap:true the checker cycles forever when every remaining
@@ -620,7 +656,7 @@ extension EditorEngine.TextView: EditorActions {
             if let firstSeen, NSEqualRanges(range, firstSeen) { return }
             if firstSeen == nil { firstSeen = range }
             let word = nsText.substring(with: range)
-            if !Self.ignoredWords.contains(word) {
+            if !ignoredSpellingWords.contains(word) {
                 selectedRange = range
                 scrollRangeToVisible(range)
                 return
@@ -630,7 +666,7 @@ extension EditorEngine.TextView: EditorActions {
                 range: NSRange(location: 0, length: nsText.length),
                 startingAt: NSMaxRange(range),
                 wrap: true,
-                language: "en_US"
+                language: spellCheckingLanguage
             )
         }
     }
@@ -650,12 +686,12 @@ extension EditorEngine.TextView: EditorActions {
         // learned-words dictionary. `ignoreWord` is an instance
         // method scoped per checker.
         UITextChecker.learnWord(word)
-        Self.ignoredWords.remove(word)
+        ignoredSpellingWords.remove(word)
     }
 
     func ignoreWord(_ word: String) {
         Self.textChecker.ignoreWord(word)
-        Self.ignoredWords.insert(word)
+        ignoredSpellingWords.insert(word)
     }
 
     /// Walk-through driver: skips over session-ignored words and
@@ -669,7 +705,7 @@ extension EditorEngine.TextView: EditorActions {
             range: full,
             startingAt: max(0, min(location, nsText.length)),
             wrap: true,
-            language: "en_US"
+            language: spellCheckingLanguage
         )
         // wrap:true cycles forever when every remaining hit is
         // ignored — bail once the first range comes around again.
@@ -678,11 +714,11 @@ extension EditorEngine.TextView: EditorActions {
             if let firstSeen, NSEqualRanges(range, firstSeen) { return nil }
             if firstSeen == nil { firstSeen = range }
             let word = nsText.substring(with: range)
-            if !Self.ignoredWords.contains(word) {
+            if !ignoredSpellingWords.contains(word) {
                 let guesses = Self.textChecker.guesses(
                     forWordRange: range,
                     in: nsText as String,
-                    language: "en_US"
+                    language: spellCheckingLanguage
                 ) ?? []
                 return (range, word, guesses)
             }
@@ -691,7 +727,7 @@ extension EditorEngine.TextView: EditorActions {
                 range: full,
                 startingAt: NSMaxRange(range),
                 wrap: true,
-                language: "en_US"
+                language: spellCheckingLanguage
             )
         }
         return nil
@@ -699,7 +735,7 @@ extension EditorEngine.TextView: EditorActions {
 
     /// Namespace so we replace only misspelling marks, not live-match
     /// / bracket-match / find-bar highlights.
-    private static let misspellingHighlightID = "writad.misspelling-"
+    private static let misspellingHighlightID = "pilcrow.misspelling-"
 
     func highlightAllMisspellings() {
         let nsText = text as NSString
@@ -712,12 +748,12 @@ extension EditorEngine.TextView: EditorActions {
                 range: full,
                 startingAt: cursor,
                 wrap: false,
-                language: "en_US"
+                language: spellCheckingLanguage
             )
             guard r.location != NSNotFound else { break }
             // Skip words the user has flagged as ignored this session.
             let word = nsText.substring(with: r)
-            if !Self.ignoredWords.contains(word) {
+            if !ignoredSpellingWords.contains(word) {
                 hits.append(r)
             }
             cursor = r.location + max(r.length, 1)
@@ -788,7 +824,7 @@ extension EditorEngine.TextView: EditorActions {
 
     // MARK: - Bracket match
 
-    private static let bracketHighlightID = "writad.bracketMatch"
+    private static let bracketHighlightID = "pilcrow.bracketMatch"
 
     func goToMatchingBracket() {
         guard let match = BracketMatcher.matchingLocation(in: text as NSString, cursor: selectedRange.location) else { return }

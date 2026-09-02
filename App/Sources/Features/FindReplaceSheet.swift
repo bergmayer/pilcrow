@@ -1,17 +1,11 @@
 import SwiftUI
 
-/// Mac-style find/replace floating panel. Lives as a sheet on iPad but feels
-/// like a compact Find dialog: search field, replace field, options, and
-/// stepwise Find / Replace controls. Updates `AppStateBus.shared.find.context`
-/// as the user types so ⌘G / ⌘⇧G keep working from outside this view.
-///
-/// The "Query Mode" toggle turns Replace into a confirm-each-match flow:
-/// Find advances to the next match and highlights it; the user picks
-/// Replace, Skip, or Replace All for the rest. Same sheet, two modes.
+/// Find, replace, and confirm-each-match workflows.
 struct FindReplaceSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Bindable private var bus = AppStateBus.shared
+    let editor: EditorState
 
     @State private var showReplace: Bool = false
     @State private var queryMode: Bool = false
@@ -85,6 +79,7 @@ struct FindReplaceSheet: View {
                 }
             }
             .onAppear {
+                claimOwner()
                 searchFieldFocused = true
                 if bus.find.pendingShowReplace {
                     showReplace = true
@@ -186,17 +181,20 @@ struct FindReplaceSheet: View {
 
     private func stepNext() {
         clearMessages()
+        claimOwner()
         CommandActions.stepToMatch(forward: true)
     }
 
     private func stepPrevious() {
         clearMessages()
+        claimOwner()
         CommandActions.stepToMatch(forward: false)
     }
 
     private func replaceCurrentAndAdvance() {
         clearMessages()
-        guard let textView = AppStateBus.shared.scenes.currentEditor?.textView else { return }
+        claimOwner()
+        guard let textView = editor.textView else { return }
         let ctx = bus.find.context
         if textView.selectedRange.length > 0,
            let selected = textView.text(in: textView.selectedRange),
@@ -205,14 +203,15 @@ struct FindReplaceSheet: View {
                 ? evaluatedReplacement(for: selected, context: ctx) ?? ctx.replacement
                 : ctx.replacement
             textView.replace(textView.selectedRange, withText: replacement)
-            AppStateBus.shared.scenes.currentEditor?.setText?(textView.text)
+            editor.setText?(textView.text)
         }
         CommandActions.stepToMatch(forward: true)
     }
 
     private func replaceAll() {
         clearMessages()
-        guard let textView = AppStateBus.shared.scenes.currentEditor?.textView else { return }
+        claimOwner()
+        guard let textView = editor.textView else { return }
         let ctx = bus.find.context
         var cursor = 0
         var count = 0
@@ -232,7 +231,7 @@ struct FindReplaceSheet: View {
                 // never move the cursor — force it past the match site.
                 if match.range.length == 0 { cursor += 1 }
             }
-            AppStateBus.shared.scenes.currentEditor?.setText?(textView.text)
+            editor.setText?(textView.text)
             statusText = "Replaced \(count) match\(count == 1 ? "" : "es")."
         } catch {
             errorText = error.localizedDescription
@@ -259,9 +258,10 @@ struct FindReplaceSheet: View {
         if let match = currentMatch {
             cursor = max(NSMaxRange(match.range), match.range.location + 1)
         } else {
-            cursor = AppStateBus.shared.scenes.currentEditor?.selectedRange.location ?? 0
+            cursor = editor.selectedRange.location
         }
         do {
+            claimOwner()
             if let match = try CommandActions.nextQueryReplaceMatch(
                 query: resolvedQuery,
                 replacement: bus.find.context.replacement,
@@ -286,6 +286,7 @@ struct FindReplaceSheet: View {
 
     private func queryReplaceCurrent() {
         guard let match = currentMatch else { return }
+        claimOwner()
         CommandActions.applyQueryReplaceMatch(match)
         queryReplacedCount += 1
         currentMatch = nil
@@ -293,7 +294,8 @@ struct FindReplaceSheet: View {
 
     private func queryReplaceAll() {
         errorText = nil
-        var cursor = AppStateBus.shared.scenes.currentEditor?.selectedRange.location ?? 0
+        claimOwner()
+        var cursor = editor.selectedRange.location
         var count = 0
         do {
             while let match = try CommandActions.nextQueryReplaceMatch(
@@ -322,6 +324,10 @@ struct FindReplaceSheet: View {
     private func clearMessages() {
         statusText = nil
         errorText = nil
+    }
+
+    private func claimOwner() {
+        bus.scenes.claimFocus(state: editor)
     }
 
     private func currentSelectionMatches(_ selected: String, against ctx: FindContext) -> Bool {

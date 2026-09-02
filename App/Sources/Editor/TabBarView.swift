@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 /// filenames. Long-press a tab for the context menu (close / pin /
 /// close others / close to the right); drag a tab to reorder it
 /// within its half of the strip. The trailing area carries the
-/// new-tab `+` button (long-press for recently-closed) and the
+/// new-tab `+` button (long-press for templates/recently-closed) and the
 /// Show-All-Tabs grid button.
 struct TabBarView: View {
     @Bindable var session: EditorSession
@@ -16,19 +16,24 @@ struct TabBarView: View {
     /// stoplight (close / minimize / resize) chrome at the top-left
     /// of the window. Matches the inset `WindowToolbar` uses.
     private let stoplightInset: CGFloat = 70
+    private let stripHeight: CGFloat = 46
 
     var body: some View {
-        tabStrip
-            .padding(.leading, stoplightInset)
-            .padding(.trailing, 8)
-            .padding(.top, 6)
-            // No bottom padding — active tab's background merges
-            // straight into the document area below.
-            .frame(height: 44)
-        // Inactive tabs sit on a distinct strip; the active tab uses
-        // `systemBackground` so its bottom edge merges into the
-        // editor below with no visible seam.
-        .background(Color(.secondarySystemBackground))
+        ZStack(alignment: .bottom) {
+            Color(.secondarySystemBackground)
+            // The active tab is opaque and reaches the bottom edge, hiding
+            // this rule beneath itself. The visible rule under every other
+            // tab makes the selected tab read as an opening into the content
+            // surface rather than one more detached pill.
+            Rectangle()
+                .fill(Color(.separator).opacity(0.55))
+                .frame(height: 0.5)
+            tabStrip
+                .padding(.leading, stoplightInset)
+                .padding(.trailing, 8)
+                .padding(.top, 6)
+        }
+        .frame(height: stripHeight)
         // Strip-level drop destination: drops on empty space (not on
         // a specific pill) append the dragged tab to this window.
         // Drops on a specific pill still go through that pill's own
@@ -60,10 +65,11 @@ struct TabBarView: View {
         // available width evenly; pinned pills stay compact (fixed
         // size). `+` and Show-All-Tabs sit at the trailing end at
         // their natural widths.
-        HStack(spacing: 2) {
+        HStack(alignment: .bottom, spacing: 3) {
             ForEach(session.tabs) { tab in
                 draggablePill(for: tab)
                     .frame(maxWidth: tab.isPinned ? nil : .infinity)
+                    .zIndex(tab.id == session.selectedTabID ? 1 : 0)
             }
             plusButton
             showAllTabsButton
@@ -75,7 +81,7 @@ struct TabBarView: View {
         TabPillView(
             tab: tab,
             isActive: tab.id == session.selectedTabID,
-            // Always closeable — the last close spawns a launcher
+            // Always closeable — the last close spawns a blank editor
             // tab in place rather than emptying the session.
             isCloseable: true,
             onSelect: { session.selectedTabID = tab.id },
@@ -115,6 +121,13 @@ struct TabBarView: View {
         // parity). Implemented as a Menu with a `primaryAction` tap
         // handler so both gestures work without extra plumbing.
         Menu {
+            Button {
+                AppStateBus.shared.scenes.claimFocus(session: session)
+                CommandActions.newFromTemplate()
+            } label: {
+                Label("New from Template…", systemImage: "doc.badge.plus")
+            }
+            Divider()
             if session.recentlyClosed.isEmpty {
                 Text("No Recently Closed Tabs")
             } else {
@@ -135,10 +148,8 @@ struct TabBarView: View {
                 .frame(width: 28, height: 28)
                 .foregroundStyle(.secondary)
         } primaryAction: {
-            // Route through CommandActions so the user-initiated
-            // new tab also surfaces the drafts-recovery sheet
-            // (max 6 drafts, newest pushes oldest out) — same
-            // recovery entry point as ⌘T and ⌘N.
+            // Route through CommandActions so +, Cmd-T, and the menus all
+            // use the same to-the-right insertion rule and blank editor.
             AppStateBus.shared.scenes.claimFocus(session: session)
             CommandActions.newTab()
         }
@@ -202,12 +213,29 @@ private struct TabPillView: View {
 
     var body: some View {
         pillContent
+            .frame(height: isActive ? 40 : 32)
+            .background { pillBackground }
+            .overlay { pillOutline }
+            .overlay(alignment: .top) {
+                if isActive {
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(height: 3)
+                        .padding(.horizontal, 9)
+                        .padding(.top, 2)
+                }
+            }
+            // Inactive tabs float above the document-edge rule. Only the
+            // active tab reaches through it into the content below.
+            .padding(.bottom, isActive ? 0 : 4)
             .contentShape(.rect)
             .onTapGesture { onSelect() }
             .contextMenu { contextMenu }
             .accessibilityElement(children: .combine)
             .accessibilityLabel(accessibilityLabel)
+            .accessibilityValue(isActive ? "Active" : "Inactive")
             .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : .isButton)
+            .animation(.easeOut(duration: 0.12), value: isActive)
     }
 
     @ViewBuilder
@@ -226,11 +254,9 @@ private struct TabPillView: View {
     private var pinnedChip: some View {
         Image(systemName: pinnedIconName)
             .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(isActive ? Color.accentColor : .secondary)
-            .frame(width: 36, height: 36)
-            .padding(.top, 8)
-            .padding(.bottom, 4)
-            .background { pillBackground }
+            .foregroundStyle(isActive ? Color.primary : .secondary)
+            .frame(width: 36)
+            .frame(maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -257,28 +283,47 @@ private struct TabPillView: View {
                 .accessibilityLabel("Close Tab")
             }
         }
-        .padding(.horizontal, 14)
-        // Top padding > bottom so the active tab visually "lifts"
-        // out of the bar into the document area below.
-        .padding(.top, 10)
-        .padding(.bottom, 4)
-        .background { pillBackground }
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    @ViewBuilder
     private var pillBackground: some View {
-        // Active tab carries the document's background colour up
-        // to the top edge with rounded upper corners; inactive
-        // tabs are lighter chips on the bar's strip.
-        UnevenRoundedRectangle(
-            topLeadingRadius: 8,
-            bottomLeadingRadius: 0,
-            bottomTrailingRadius: 0,
-            topTrailingRadius: 8,
-            style: .continuous
-        )
-        .fill(isActive
-              ? Color(.systemBackground)
-              : Color(.tertiarySystemBackground))
+        if isActive {
+            UnevenRoundedRectangle(
+                topLeadingRadius: 9,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 9,
+                style: .continuous
+            )
+            .fill(activeSurfaceColor)
+        } else {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.secondarySystemFill))
+        }
+    }
+
+    @ViewBuilder
+    private var pillOutline: some View {
+        if isActive {
+            ActiveTabOutline(cornerRadius: 9)
+                .stroke(Color(.separator).opacity(0.8), lineWidth: 0.75)
+        } else {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(.separator).opacity(0.22), lineWidth: 0.5)
+        }
+    }
+
+    /// Match the surface directly below the tab. The launcher uses grouped
+    /// chrome; editors and the in-tab file browser use the standard surface.
+    private var activeSurfaceColor: Color {
+        switch tab.kind {
+        case .launcher:
+            Color(.systemGroupedBackground)
+        case .editor, .fileBrowser:
+            Color(.systemBackground)
+        }
     }
 
     @ViewBuilder
@@ -305,7 +350,7 @@ private struct TabPillView: View {
     private var label: String {
         switch tab.kind {
         case .fileBrowser: return "New Tab"
-        case .launcher:    return "New"
+        case .launcher:    return "New Tab"
         case .editor:
             let base = tab.document.displayName
             // Only show the unsaved-dot for genuinely dirty buffers.
@@ -330,5 +375,29 @@ private struct TabPillView: View {
         case .editor:
             return tab.document.fileURL == nil ? "pin.fill" : "doc.text.fill"
         }
+    }
+}
+
+/// Open path around the selected tab: top and sides only. Omitting the
+/// bottom segment is what visually joins the tab to the document surface.
+private struct ActiveTabOutline: Shape {
+    let cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let radius = min(cornerRadius, rect.width / 2, rect.height)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + radius, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY + radius),
+            control: CGPoint(x: rect.maxX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        return path
     }
 }

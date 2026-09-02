@@ -5,18 +5,13 @@ extension CommandActions {
 
     // MARK: - Reflow paragraph (BBEdit hard-wrap)
 
-    /// Hard-wrap the selected text (or current paragraph if no
-    /// selection) at `column`. Preserves leading `>` quote prefixes
-    /// per line so reflowing email/forum replies stays sane —
-    /// strips them, wraps the body, re-applies them on output.
+    /// Hard-wraps the selection or current paragraph.
     static func reflowParagraph(column: Int = 80) {
         guard let textView = actions else { return }
         let nsText = textView.text as NSString
         let target: NSRange = {
             let sel = textView.selectedRange
             if sel.length > 0 { return nsText.lineRange(for: sel) }
-            // Empty selection: expand to the current "paragraph" —
-            // the run of non-blank lines around the cursor.
             return Self.paragraphRange(in: nsText, around: sel.location)
         }()
         guard target.length > 0, let block = textView.text(in: target) else { return }
@@ -26,9 +21,7 @@ extension CommandActions {
         commitTextChange()
     }
 
-    /// Wrap `block` to `column` columns, preserving the leading
-    /// `> ` quote prefix shared by its lines (or matched per-line
-    /// when prefixes differ).
+    /// Preserves a quote prefix shared by every line.
     private static func reflow(block: String, column: Int) -> String {
         let nl = state?.lineEnding.string ?? "\n"
         var lines = block.components(separatedBy: .newlines)
@@ -36,9 +29,6 @@ extension CommandActions {
         if lines.last == "" { lines.removeLast() }
         guard !lines.isEmpty else { return block }
 
-        // Quote prefix = leading sequence of `>` + space, captured
-        // from the first line; if any line has a different prefix,
-        // fall through to the no-prefix path.
         let firstPrefix = quotePrefix(of: lines[0])
         let samePrefix = lines.allSatisfy { quotePrefix(of: $0) == firstPrefix }
         let prefix = samePrefix ? firstPrefix : ""
@@ -71,8 +61,6 @@ extension CommandActions {
         return output.joined(separator: nl) + nl
     }
 
-    /// `> ` or `>> ` etc. prefix at the start of a quoted line.
-    /// Empty for unquoted lines.
     private static func quotePrefix(of line: String) -> String {
         var i = line.startIndex
         while i < line.endIndex, line[i] == ">" {
@@ -85,9 +73,7 @@ extension CommandActions {
         return String(line[..<i])
     }
 
-    /// Expand a single-cursor location to the surrounding "paragraph"
-    /// (non-blank run of lines). Returns the cursor's line if it
-    /// sits on a blank line.
+    /// Expands a cursor to its surrounding nonblank lines.
     private static func paragraphRange(in nsText: NSString, around location: Int) -> NSRange {
         let line = nsText.lineRange(for: NSRange(location: location, length: 0))
         var startLine = line
@@ -110,11 +96,7 @@ extension CommandActions {
 
     // MARK: - Sort by regex capture
 
-    /// Sort the selected lines (or whole document) using a regex
-    /// capture group as the sort key. `pattern` is matched against
-    /// each line; `captureIndex` (1-based) names which capture
-    /// group's value sorts. Lines that don't match sort to the end
-    /// (or start, in descending order).
+    /// Sorts lines using a regular-expression capture as the key.
     static func sortLinesByCapture(_ pattern: String, captureIndex: Int = 1, ascending: Bool = true) {
         guard let textView = actions else { return }
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
@@ -168,9 +150,6 @@ extension CommandActions {
         case copyMatchingToClipboard
     }
 
-    /// Filter the document (or selection) line-by-line against
-    /// `pattern`. `regex == false` runs a substring contains check.
-    /// `invert == true` operates on lines that DON'T match.
     static func processLines(pattern: String,
                               regex: Bool,
                               invert: Bool,
@@ -187,43 +166,56 @@ extension CommandActions {
         let trailingEmpty = lines.last == ""
         let payload = trailingEmpty ? Array(lines.dropLast()) : lines
 
-        let regexObj: NSRegularExpression? = regex ? (try? NSRegularExpression(pattern: pattern)) : nil
-        if regex, regexObj == nil {
+        guard let matches = lineMatcher(pattern: pattern, useRegex: regex) else {
             Self.context.presentation.openErrorMessage = "Bad pattern: \(pattern)"
             return
         }
-        let matches: (String) -> Bool = { line in
-            if let regexObj {
-                let r = NSRange(location: 0, length: (line as NSString).length)
-                return regexObj.firstMatch(in: line, range: r) != nil
+        let groups = payload.reduce(into: (selected: [String](), remaining: [String]())) {
+            result, line in
+            if matches(line) != invert {
+                result.selected.append(line)
+            } else {
+                result.remaining.append(line)
             }
-            return line.contains(pattern)
         }
-        let kept = payload.filter { invert ? !matches($0) : matches($0) }
 
         switch action {
         case .keepMatching:
-            var output = kept.joined(separator: nl)
-            if trailingEmpty { output += nl }
-            textView.replace(scopeRange, withText: output)
-            commitTextChange()
+            replaceLines(groups.selected, in: scopeRange, ending: nl, trailingEmpty: trailingEmpty)
         case .deleteMatching:
-            let surviving = payload.filter { invert ? matches($0) : !matches($0) }
-            var output = surviving.joined(separator: nl)
-            if trailingEmpty { output += nl }
-            textView.replace(scopeRange, withText: output)
-            commitTextChange()
+            replaceLines(groups.remaining, in: scopeRange, ending: nl, trailingEmpty: trailingEmpty)
         case .copyMatchingToClipboard:
-            UIPasteboard.general.string = kept.joined(separator: nl)
+            UIPasteboard.general.string = groups.selected.joined(separator: nl)
         }
+    }
+
+    private static func lineMatcher(
+        pattern: String,
+        useRegex: Bool
+    ) -> ((String) -> Bool)? {
+        guard useRegex else { return { $0.contains(pattern) } }
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return nil }
+        return { line in
+            let range = NSRange(location: 0, length: (line as NSString).length)
+            return expression.firstMatch(in: line, range: range) != nil
+        }
+    }
+
+    private static func replaceLines(
+        _ lines: [String],
+        in range: NSRange,
+        ending: String,
+        trailingEmpty: Bool
+    ) {
+        var output = lines.joined(separator: ending)
+        if trailingEmpty { output += ending }
+        actions?.replace(range, withText: output)
+        commitTextChange()
     }
 
     // MARK: - Canonize
 
-    /// Apply a saved list of find/replace pairs (one pair per line,
-    /// separated by a tab — left = find, right = replace) in order
-    /// against the selection or whole document. `regex == true`
-    /// treats the find side as a regular expression.
+    /// Applies tab-separated find/replace pairs in order.
     static func applyCanonizePairs(_ raw: String, regex: Bool) {
         guard let textView = actions else { return }
         let pairs: [(find: String, replace: String)] = raw

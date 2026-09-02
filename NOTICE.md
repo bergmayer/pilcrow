@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-writað is licensed under the Apache License, Version 2.0 (see `LICENSE`).
+Pilcrow is licensed under the Apache License, Version 2.0 (see `LICENSE`).
 It vendors source code from the following upstream projects.
 
 ## CotEditor (Apache License 2.0)

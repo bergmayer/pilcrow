@@ -1,5 +1,5 @@
 import XCTest
-@testable import Writad
+@testable import Pilcrow
 
 @MainActor
 final class RevisionStoreTests: XCTestCase {
@@ -11,7 +11,7 @@ final class RevisionStoreTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
         tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("writad-revisions-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("pilcrow-revisions-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         store = RevisionStore(
             supportDirOverride: tempRoot,
@@ -173,6 +173,23 @@ final class RevisionStoreTests: XCTestCase {
         let second = await bounded.entries(forKey: "global-b")
         XCTAssertEqual(first.map(\.kind), [.original])
         XCTAssertEqual(second.map(\.kind), [.original, .manual])
+    }
+
+    func test_globalByteLimit_evictsOldestHistoryWhenOnlyOriginalsRemain() async throws {
+        let bounded = RevisionStore(
+            supportDirOverride: tempRoot,
+            maxSnapshotBytes: 100,
+            maxBytesPerDocument: 100,
+            maxTotalBytes: 3
+        )
+        _ = try await bounded.recordOriginalIfNeeded("aa", forKey: "global-a")
+        try await Task.sleep(for: .milliseconds(10))
+        _ = try await bounded.recordOriginalIfNeeded("bb", forKey: "global-b")
+
+        let first = await bounded.entries(forKey: "global-a")
+        let second = await bounded.entries(forKey: "global-b")
+        XCTAssertTrue(first.isEmpty)
+        XCTAssertEqual(second.map(\.kind), [.original])
     }
 
     // MARK: - keys

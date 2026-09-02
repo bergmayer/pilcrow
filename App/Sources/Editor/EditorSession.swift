@@ -1,44 +1,26 @@
 import Foundation
 
-/// Per-window collection of tabs. Modifiers on `EditorScene` all
-/// target the active tab.
+/// Per-window tab collection.
 @MainActor
 @Observable
 final class EditorSession {
     var tabs: [TabModel]
     var selectedTabID: UUID
-    /// View of the global pool, surfaced on the session so existing
-    /// call sites don't need to reach into `ClosedTabsStore` directly.
     var recentlyClosed: [ClosedTabRecord] { ClosedTabsStore.shared.records }
-    /// Set by `EditorScene` after its `@State` UUID is generated.
-    /// Lets session-scoped commands (Close Window) resolve the
-    /// hosting `UIScene` via `SessionsStore.scene(forSceneUUID:)`
-    /// instead of guessing from the unordered `connectedScenes`.
+    /// Links the session to its hosting scene.
     var sceneUUID: String = ""
-    /// Prevents phase/onDisappear persistence from recreating a session
-    /// record after an explicit Close Window request removed it.
+    /// Suppresses persistence while explicitly closing the window.
     var isClosingWindow = false
-    /// Per-window — used to be a single bool on the shared
-    /// PresentationState, which made the switcher overlay flip on every
-    /// open scene at once. The Show All Tabs button / ⌘⇧\ / palette
-    /// action targets the focused session's flag so multi-window setups
-    /// only show the overlay where the user interacted.
     var tabSwitcherActive: Bool = false
 
     init() {
         let initial = TabModel()
-        // Every spawn-a-tab path lands on the launcher so the user
-        // can pick a template, resume a draft, or import a file —
-        // there is no "blank document" entry point any more.
-        initial.kind = .launcher
+        initial.kind = .editor
         self.tabs = [initial]
         self.selectedTabID = initial.id
     }
 
-    /// Self-repairs a drifted selection. Tabs is invariant-checked
-    /// to be non-empty here — `closeTab` spawns a fresh launcher
-    /// tab when the user closes the final tab, so an empty array
-    /// is a programmer error.
+    /// Repairs a stale selection; an empty tab list violates the session invariant.
     var activeTab: TabModel {
         if let tab = tabs.first(where: { $0.id == selectedTabID }) { return tab }
         assertionFailure("selectedTabID \(selectedTabID) not in tabs — session is out of sync")
@@ -49,20 +31,26 @@ final class EditorSession {
         return first
     }
 
-    /// Default `.launcher` so every Cmd-T lands on the document
-    /// shell; callers that already know they're seeding content
-    /// (open file → new tab, recover draft, reopen closed tab) pass
-    /// `.editor` to skip the launcher transit.
     @discardableResult
-    func newTab(kind: TabKind = .launcher) -> TabModel {
+    func newTab(kind: TabKind = .editor) -> TabModel {
         let tab = TabModel()
         tab.kind = kind
-        // Drop after the last pinned tab so newcomers don't shove
-        // pins around — Safari rule.
-        let insertAt = tabs.partitionPointAfterPinned()
+        let insertAt = newUnpinnedTabInsertionIndex()
         tabs.insert(tab, at: insertAt)
         selectedTabID = tab.id
         return tab
+    }
+
+    private func newUnpinnedTabInsertionIndex() -> Int {
+        guard let selectedIndex = tabs.firstIndex(where: {
+            $0.id == selectedTabID
+        }) else {
+            return tabs.count
+        }
+        if tabs[selectedIndex].isPinned {
+            return tabs.partitionPointAfterPinned()
+        }
+        return min(selectedIndex + 1, tabs.count)
     }
 
     /// "Open in New Tab" entry point. The pick callback flips kind
@@ -80,12 +68,9 @@ final class EditorSession {
         case discard
     }
 
-    /// Always succeeds. When the last tab closes, a fresh launcher
-    /// tab takes its place so the window keeps a renderable
-    /// surface and the user gets a clear "start over" affordance.
-    /// To destroy the window outright, use the launcher's Cancel
-    /// button (it routes through `CommandActions.closeWindow()`)
-    /// or ⌘⇧W from the menu.
+    /// Always succeeds. When the last tab closes, a fresh blank editor
+    /// takes its place so the window keeps a renderable surface. To
+    /// destroy the window outright, use ⌘⇧W from the menu.
     @discardableResult
     func closeTab(_ id: UUID, disposition: CloseDisposition = .archive) -> Bool {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return false }
@@ -97,7 +82,7 @@ final class EditorSession {
         tabs.remove(at: idx)
         if tabs.isEmpty {
             let fresh = TabModel()
-            fresh.kind = .launcher
+            fresh.kind = .editor
             tabs.append(fresh)
             selectedTabID = fresh.id
         } else if wasActive {

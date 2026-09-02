@@ -1,12 +1,6 @@
 import SwiftUI
 
-/// `@Observable` mirror over UserDefaults. Single source of truth for
-/// every preference; reads seed from `UserDefaults.standard` at init,
-/// writes propagate via `didSet`. Views @Bindable into this rather than
-/// declaring a fresh `@AppStorage` per field per file, and
-/// `EditorState`'s preference properties are computed pass-throughs
-/// rather than mirrored copies — Settings changes reach the engine
-/// without a sync layer.
+/// Observable, persistent application preferences.
 @MainActor
 @Observable
 final class AppPreferencesStore {
@@ -71,9 +65,6 @@ final class AppPreferencesStore {
     // MARK: Large-file behaviour
     var syntaxLimitBytes: Int { didSet { write(AppPreferenceKey.syntaxLimitBytes, syntaxLimitBytes) } }
 
-    // MARK: iCloud
-    var iCloudSyncEnabled: Bool { didSet { write(AppPreferenceKey.iCloudSyncEnabled, iCloudSyncEnabled) } }
-
     private init() {
         let d = UserDefaults.standard
         themeName = d.string(forKey: AppPreferenceKey.themeName) ?? AppThemeName.automatic.rawValue
@@ -123,21 +114,17 @@ final class AppPreferencesStore {
         defaultLineEndingRaw = d.string(forKey: AppPreferenceKey.defaultLineEndingRaw) ?? "\n"
         defaultLanguage = d.string(forKey: AppPreferenceKey.defaultLanguage) ?? LanguageIdentifier.markdown.rawValue
 
-        // Not positiveInt: 0 (.never) and -1 (.always) are valid sentinels
-        // it would flatten back to the 5 MB fallback.
+        // Zero and -1 are valid syntax-limit sentinels.
         let storedLimit = d.object(forKey: AppPreferenceKey.syntaxLimitBytes) as? Int
         syntaxLimitBytes = storedLimit.flatMap(SyntaxLimit.init(rawValue:))?.rawByteValue
             ?? SyntaxLimit.up5MB.rawByteValue
 
-        iCloudSyncEnabled = d.bool(forKey: AppPreferenceKey.iCloudSyncEnabled)
     }
 
     private func write<T>(_ key: String, _ value: T) {
         UserDefaults.standard.set(value, forKey: key)
     }
 
-    /// UserDefaults returns 0 for unset Int/Double keys; some prefs need
-    /// a real fallback rather than the literal 0.
     private static func positiveInt(_ d: UserDefaults, _ key: String, fallback: Int) -> Int {
         let v = d.integer(forKey: key)
         return v > 0 ? v : fallback

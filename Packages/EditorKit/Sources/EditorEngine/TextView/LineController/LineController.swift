@@ -63,7 +63,14 @@ final class LineController {
             typesetter.constrainingWidth
         }
         set {
+            guard abs(typesetter.constrainingWidth - newValue) > CGFloat.ulpOfOne else { return }
             typesetter.constrainingWidth = newValue
+            // Existing Core Text fragments encode the width at which they
+            // were created. Reusing them at a new width clips source ranges
+            // while still advancing past those ranges.
+            isLineFragmentCacheInvalid = true
+            isTypesetterInvalid = true
+            _lineHeight = nil
         }
     }
     var lineWidth: CGFloat {
@@ -191,7 +198,12 @@ final class LineController {
     }
 
     func lineFragmentNode(containingCharacterAt location: Int) -> LineFragmentNode? {
-        lineFragmentTree.node(containingLocation: location)
+        guard location >= 0, location <= lineFragmentTree.nodeTotalValue else { return nil }
+        return lineFragmentTree.node(containingLocation: location)
+    }
+
+    func needsTypesetting(to location: Int) -> Bool {
+        isTypesetterInvalid || typesetter.typesetLength < location
     }
 
     func lineFragmentNode(atIndex index: Int) -> LineFragmentNode {

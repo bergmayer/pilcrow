@@ -1,37 +1,15 @@
 import Foundation
 import CryptoKit
 
-/// Per-document snapshot history persisted in the app sandbox.
-///
-/// Each file URL maps to a folder under
-/// `Application Support/writað/Revisions/<sha256(path)>/` holding
-/// numbered `.bin` snapshot files plus a `meta.json` manifest.
-///
-/// Three kinds of revisions:
-///   - `.original` — captured the first time a file is loaded. Always
-///     preserved; cap-eviction skips it.
-///   - `.auto`     — emitted by the debounced auto-save. Consecutive
-///     auto revisions within `autoCoalesceWindow` collapse into one
-///     so steady typing doesn't blow through the cap.
-///   - `.manual`   — explicit ⌘S or save-as. Never coalesced.
-///
-/// Older non-original revisions are dropped once `maxRevisions` is
-/// exceeded. The original-on-open snapshot is the "revert all the
-/// way back" anchor.
+/// Bounded per-document snapshot history stored in Application Support.
 actor RevisionStore {
 
     static let shared = RevisionStore()
 
-    /// Cap on stored revisions per file (excluding the original,
-    /// which is always kept). 50 covers ~an hour of busy editing
-    /// with the 60 s auto-coalesce window.
+    /// Per-file cap, excluding the original snapshot.
     let maxRevisions: Int
-    /// Auto-saves within this window of the previous auto revision
-    /// overwrite it instead of adding a new entry.
+    /// Consecutive automatic revisions inside this window coalesce.
     let autoCoalesceWindow: TimeInterval
-    /// Revisions are a convenience history, not the sole recovery path.
-    /// Large buffers stay protected by Drafts/Scratch without multiplying
-    /// their size dozens of times in this store.
     let maxSnapshotBytes: Int
     let maxBytesPerDocument: Int
     let maxTotalBytes: Int
@@ -62,10 +40,6 @@ actor RevisionStore {
         case manual
     }
 
-    /// Failure modes the public API surfaces. Internally these are
-    /// caught at the boundary (e.g. `PlainTextDocument.autoSave`),
-    /// routed to `AppStateBus.shared.presentation.openErrorMessage`, and never
-    /// silently swallowed.
     enum Failure: LocalizedError {
         case directoryCreateFailed(URL, any Error)
         case snapshotWriteFailed(URL, any Error)
@@ -255,76 +229,101 @@ actor RevisionStore {
         }
     }
 
-    /// Global quota keeps histories for an unbounded number of documents
-    /// from growing without limit. Old non-original entries go first; if
-    /// original anchors alone exceed the budget, the least-recently-used
-    /// document history is removed as one unit.
+    private struct EvictionCandidate {
+        let key: String
+        let entry: Entry
+        let bytes: Int
+    }
+
+    private struct GlobalUsage {
+        var manifests: [String: Manifest] = [:]
+        var totalBytes = 0
+        var candidates: [EvictionCandidate] = []
+    }
+
     private func enforceGlobalLimit() {
-        guard maxTotalBytes >= 0 else { return }
+        var usage = collectGlobalUsage()
+        guard usage.totalBytes > maxTotalBytes else { return }
+
+        evictNonOriginals(from: &usage)
+        guard usage.totalBytes > maxTotalBytes else { return }
+        evictOldestHistories(from: &usage)
+    }
+
+    private func collectGlobalUsage() -> GlobalUsage {
         let manager = FileManager.default
         let directories = (try? manager.contentsOfDirectory(
             at: revisionsRoot,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         )) ?? []
-
-        struct Candidate {
-            let key: String
-            let entry: Entry
-            let bytes: Int
-        }
-        var manifests: [String: Manifest] = [:]
-        var total = 0
-        var candidates: [Candidate] = []
+        var usage = GlobalUsage()
 
         for directory in directories {
             let key = directory.lastPathComponent
-            var manifest = loadManifest(forKey: key)
-            let snapshotFiles = (try? manager.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ))?.filter { $0.pathExtension == "bin" } ?? []
-            let existingNames = Set(snapshotFiles.map(\.lastPathComponent))
-            let knownNames = Set(manifest.entries.map { "\($0.index).bin" })
-            for orphan in snapshotFiles where !knownNames.contains(orphan.lastPathComponent) {
-                try? manager.removeItem(at: orphan)
-            }
-            let beforeCount = manifest.entries.count
-            manifest.entries.removeAll { !existingNames.contains("\($0.index).bin") }
-            if manifest.entries.count != beforeCount {
-                try? saveManifest(manifest, forKey: key)
-            }
-            manifests[key] = manifest
+            let manifest = reconcileManifest(in: directory, key: key, manager: manager)
+            usage.manifests[key] = manifest
             for entry in manifest.entries {
                 let snapshot = directory.appendingPathComponent("\(entry.index).bin")
                 let bytes = (try? snapshot.resourceValues(forKeys: [.fileSizeKey]).fileSize)
                     ?? entry.byteSize
-                total += bytes
+                usage.totalBytes += bytes
                 if entry.kind != .original {
-                    candidates.append(Candidate(key: key, entry: entry, bytes: bytes))
+                    usage.candidates.append(EvictionCandidate(
+                        key: key,
+                        entry: entry,
+                        bytes: bytes
+                    ))
                 }
             }
         }
-        guard total > maxTotalBytes else { return }
+        return usage
+    }
 
-        candidates.sort { $0.entry.timestamp < $1.entry.timestamp }
-        for candidate in candidates where total > maxTotalBytes {
-            guard var manifest = manifests[candidate.key],
+    private func reconcileManifest(
+        in directory: URL,
+        key: String,
+        manager: FileManager
+    ) -> Manifest {
+        var manifest = loadManifest(forKey: key)
+        let snapshotFiles = (try? manager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ))?.filter { $0.pathExtension == "bin" } ?? []
+        let existingNames = Set(snapshotFiles.map(\.lastPathComponent))
+        let knownNames = Set(manifest.entries.map { "\($0.index).bin" })
+
+        for orphan in snapshotFiles where !knownNames.contains(orphan.lastPathComponent) {
+            try? manager.removeItem(at: orphan)
+        }
+        let previousCount = manifest.entries.count
+        manifest.entries.removeAll { !existingNames.contains("\($0.index).bin") }
+        if manifest.entries.count != previousCount {
+            try? saveManifest(manifest, forKey: key)
+        }
+        return manifest
+    }
+
+    private func evictNonOriginals(from usage: inout GlobalUsage) {
+        usage.candidates.sort { $0.entry.timestamp < $1.entry.timestamp }
+        for candidate in usage.candidates where usage.totalBytes > maxTotalBytes {
+            guard var manifest = usage.manifests[candidate.key],
                   let index = manifest.entries.firstIndex(where: { $0.id == candidate.entry.id })
             else { continue }
-            try? manager.removeItem(
+            try? FileManager.default.removeItem(
                 at: snapshotsDirectory(forKey: candidate.key)
                     .appendingPathComponent("\(candidate.entry.index).bin")
             )
             manifest.entries.remove(at: index)
-            manifests[candidate.key] = manifest
-            total -= candidate.bytes
+            usage.manifests[candidate.key] = manifest
+            usage.totalBytes -= candidate.bytes
             try? saveManifest(manifest, forKey: candidate.key)
         }
+    }
 
-        guard total > maxTotalBytes else { return }
-        let histories = manifests.map { key, manifest in
+    private func evictOldestHistories(from usage: inout GlobalUsage) {
+        let histories = usage.manifests.map { key, manifest in
             (
                 key: key,
                 latest: manifest.entries.map(\.timestamp).max() ?? .distantPast,
@@ -332,16 +331,13 @@ actor RevisionStore {
             )
         }
         .sorted { $0.latest < $1.latest }
-        for history in histories where total > maxTotalBytes {
-            try? manager.removeItem(at: directory(forKey: history.key))
-            total -= history.bytes
+        for history in histories where usage.totalBytes > maxTotalBytes {
+            try? FileManager.default.removeItem(at: directory(forKey: history.key))
+            usage.totalBytes -= history.bytes
         }
     }
 
-    /// Single-line preview for the revisions list. Bounded work even
-    /// for very large buffers — only the first ~200 scalars are
-    /// inspected, since auto-save fires every 800ms while typing and
-    /// the full string transform on a multi-MB doc would dominate.
+    /// Builds a bounded single-line preview without scanning a large buffer.
     private func makePreview(from text: String) -> String {
         var out = ""
         out.reserveCapacity(Self.previewCharLimit)
@@ -350,8 +346,6 @@ actor RevisionStore {
                 let trimmed = out.trimmingCharacters(in: .whitespaces)
                 return trimmed.isEmpty ? "" : trimmed + "…"
             }
-            // Collapse line breaks into spaces inline so we don't have
-            // to do a separate replace pass.
             if scalar == "\n" || scalar == "\r" {
                 out.append(" ")
             } else {
@@ -383,7 +377,7 @@ actor RevisionStore {
         }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? FileManager.default.temporaryDirectory
-        return support.appendingPathComponent("writað/Revisions", isDirectory: true)
+        return support.appendingPathComponent("Pilcrow/Revisions", isDirectory: true)
     }
 
     private func ensureDirectory(at url: URL) throws {

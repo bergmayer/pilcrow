@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// One file in `Documents/Templates/`. Tapping the row in the
 /// launcher seeds a brand-new Untitled tab with the file's bytes —
@@ -15,38 +16,30 @@ struct TemplateRecord: Identifiable, Equatable {
     let symbol: String
 }
 
-/// First-run seeding + live enumeration of `Documents/Templates/`.
-/// The user can drop additional template files into the folder via
-/// Files.app — they show up in the launcher next time it appears.
+/// First-run seeding + live enumeration of the device-local
+/// `Documents/Templates/` folder. The folder is available through
+/// Files because file sharing is enabled; it requires no cloud capability.
 @MainActor
 final class TemplatesStore {
 
     static let shared = TemplatesStore()
 
-    /// Active write root — iCloud when sync is on and the user is
-    /// signed in, otherwise local Documents. Default seeds get
-    /// (re-)installed here so an app update can ship new defaults,
-    /// but a user-added template is never auto-deleted.
+    /// Default seeds get (re-)installed here so an app update can ship
+    /// new defaults, but a user-added template is never auto-deleted.
     var directory: URL {
-        UbiquityContainer.documentsURLForWrite.appendingPathComponent("Templates", isDirectory: true)
-    }
-
-    /// Every root the launcher scans for templates. Listing both
-    /// roots means a user who flipped iCloud off keeps seeing the
-    /// templates they previously synced.
-    var readDirectories: [URL] {
-        UbiquityContainer.documentsRootsForRead.map {
-            $0.appendingPathComponent("Templates", isDirectory: true)
-        }
+        Self.localDocumentsURL.appendingPathComponent("Templates", isDirectory: true)
     }
 
     private init() {}
 
+    private static let localDocumentsURL = FileManager.default.urls(
+        for: .documentDirectory,
+        in: .userDomainMask
+    ).first ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+
     /// Idempotent: creates the folder, writes any seed file that
     /// isn't already there. Lets the user delete a seed they don't
     /// want without it reappearing — only missing files are written.
-    /// Seeds the *active* directory only; the other root keeps
-    /// whatever templates the user left there.
     func seedIfNeeded() {
         let dir = directory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -57,27 +50,18 @@ final class TemplatesStore {
         }
     }
 
-    /// Union of every read root. Same-named templates in two roots
-    /// are deduped — iCloud wins because it's first in
-    /// `UbiquityContainer.documentsRootsForRead`.
     func loadAll() -> [TemplateRecord] {
-        var records: [TemplateRecord] = []
-        var seenName = Set<String>()
-        for dir in readDirectories {
-            let urls = (try? FileManager.default.contentsOfDirectory(
-                at: dir,
-                includingPropertiesForKeys: [.nameKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
-            for url in urls {
-                let lowercaseName = url.lastPathComponent.lowercased()
-                guard seenName.insert(lowercaseName).inserted else { continue }
-                records.append(TemplateRecord(
-                    url: url,
-                    displayName: url.deletingPathExtension().lastPathComponent,
-                    symbol: Self.symbol(for: url.pathExtension.lowercased())
-                ))
-            }
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.nameKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        let records = urls.map { url in
+            TemplateRecord(
+                url: url,
+                displayName: url.deletingPathExtension().lastPathComponent,
+                symbol: Self.symbol(for: url.pathExtension.lowercased())
+            )
         }
         return records.sorted {
             $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
@@ -123,4 +107,92 @@ final class TemplatesStore {
         ,,
         """)
     ]
+}
+
+/// Applies a template's bytes to an untitled editor buffer without ever
+/// opening or modifying the template file itself.
+@MainActor
+enum TemplateWorkflow {
+    static func apply(
+        _ template: TemplateRecord,
+        document: PlainTextDocument,
+        state: EditorState
+    ) {
+        let body = TemplatesStore.shared.loadContent(template) ?? ""
+        document.text = body
+        document.fileURL = nil
+        document.isDirty = !body.isEmpty
+        state.text = body
+        state.fileURL = nil
+        state.savedBaselineText = ""
+        state.languageIdentifier = LanguageRegistry.identifier(for: template.url)
+        state.requestEditorFocus()
+    }
+}
+
+/// Focused counterpart to the old all-purpose new-document launcher.
+/// New remains an immediate blank buffer; this sheet appears only when
+/// the user explicitly asks for New from Template.
+struct TemplatePickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var templates: [TemplateRecord] = []
+
+    let onPick: (TemplateRecord) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if templates.isEmpty {
+                    ContentUnavailableView(
+                        "No Templates",
+                        systemImage: "doc.badge.plus",
+                        description: Text(
+                            "Add files to Documents/Templates in Files, then reopen this picker."
+                        )
+                    )
+                } else {
+                    List(templates) { template in
+                        Button {
+                            onPick(template)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: template.symbol)
+                                    .font(.title3)
+                                    .foregroundStyle(.tint)
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(template.displayName)
+                                        .foregroundStyle(.primary)
+                                    Text(template.url.lastPathComponent)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("New from Template")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .onAppear {
+                TemplatesStore.shared.seedIfNeeded()
+                templates = TemplatesStore.shared.loadAll()
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
 }

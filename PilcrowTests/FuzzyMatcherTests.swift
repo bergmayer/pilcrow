@@ -1,5 +1,5 @@
 import XCTest
-@testable import Writad
+@testable import Pilcrow
 
 final class FuzzyMatcherTests: XCTestCase {
 

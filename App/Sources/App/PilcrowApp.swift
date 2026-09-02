@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 @main
-struct WritadApp: App {
+struct PilcrowApp: App {
 
     /// Bridges UIKit's quick-action callbacks (Info.plist
     /// `UIApplicationShortcutItems`) into `AppStateBus.pendingShortcut`
@@ -12,11 +12,18 @@ struct WritadApp: App {
     init() {
         AppPreferenceDefaults.register()
         TemplatesStore.shared.seedIfNeeded()
+        Task { @MainActor in
+            await DraftsStore.shared.migrateLegacyRecovery()
+        }
     }
 
     var body: some Scene {
-        WindowGroup("Editor", id: SceneID.editor.rawValue) {
-            EditorScene()
+        WindowGroup(
+            "Editor",
+            id: SceneID.editor.rawValue,
+            for: EditorRoute.self
+        ) { route in
+            EditorScene(route: route)
                 .background(WindowOpenerInstaller())
         }
         .commands {
@@ -90,6 +97,9 @@ private struct WindowOpenerInstaller: View {
                     // system's call.
                     openWindow(id: id.rawValue)
                 }
+                AppStateBus.shared.scenes.openEditorWindow = { route in
+                    openWindow(id: SceneID.editor.rawValue, value: route)
+                }
             }
     }
 }
@@ -148,18 +158,74 @@ final class AppDelegateBridge: NSObject, UIApplicationDelegate {
         return UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
     }
 
-    /// Called when iPadOS permanently discards sessions — typically
-    /// when the user swipes a window away in the App Switcher while
-    /// the app is running. Mirror into our SessionsStore so the
-    /// next launch's `configurationForConnecting` doesn't think
-    /// these discarded sessions should be restored.
+    /// Called after iPadOS permanently discards sessions. There is no
+    /// cancellable "should close" hook, so preserve any dirty window as a
+    /// local Recoverable Work record before removing it from auto-restoration.
+    /// If the process was not running at close time, UIKit delivers this on
+    /// the next launch and the same recovery path still applies.
     func application(
         _ application: UIApplication,
         didDiscardSceneSessions sceneSessions: Set<UISceneSession>
     ) {
-        for session in sceneSessions {
-            SessionsStore.shared.removeRecord(forPersistentIdentifier: session.persistentIdentifier)
+        let backgroundTask = application.beginBackgroundTask(
+            withName: "Archive discarded editor windows"
+        )
+        Task { @MainActor in
+            defer {
+                if backgroundTask != .invalid {
+                    application.endBackgroundTask(backgroundTask)
+                }
+            }
+            for session in sceneSessions {
+                let persistentID = session.persistentIdentifier
+                if let record = await recoveryRecord(forPersistentIdentifier: persistentID) {
+                    _ = ClosedWindowsStore.shared.archive(record)
+                    AppStateBus.shared.scenes.focusSurvivingSession(
+                        excludingSceneUUID: record.sceneUUID
+                    )
+                }
+                SessionsStore.shared.removeRecord(forPersistentIdentifier: persistentID)
+                DraftsStore.shared.enforceCapNow()
+            }
         }
+    }
+
+    /// When another window keeps the process alive, UIKit may deliver the
+    /// discard callback while the closing EditorSession is still registered.
+    /// Capture its exact live text synchronously. If teardown has already
+    /// deregistered it, EditorScene.onDisappear has persisted the same
+    /// information and the stored record is the fallback.
+    private func recoveryRecord(
+        forPersistentIdentifier persistentID: String
+    ) async -> SessionRecord? {
+        if let live = AppStateBus.shared.scenes.allOpenSessions.first(where: {
+            SessionsStore.shared.persistentIdentifier(
+                forSceneUUID: $0.sceneUUID
+            ) == persistentID
+        }) {
+            do {
+                try await DraftsStore.shared.withCapEnforcementSuspended {
+                    for tab in live.tabs where tab.document.isDirty {
+                        if let liveText = tab.state.textView?.text {
+                            tab.document.text = liveText
+                        }
+                        try await tab.document.commitRecoverySnapshot()
+                    }
+                }
+            } catch {
+                AppStateBus.shared.presentation.openErrorMessage =
+                    "Couldn't finish preserving a closed window: \(error.localizedDescription)"
+                return SessionsStore.shared.record(
+                    forPersistentIdentifier: persistentID
+                )
+            }
+            var record = SessionRecord(scene: live.sceneUUID, session: live)
+            record.persistentIdentifier = persistentID
+            return record
+        }
+        return SessionsStore.shared.record(
+            forPersistentIdentifier: persistentID
+        )
     }
 
     func application(

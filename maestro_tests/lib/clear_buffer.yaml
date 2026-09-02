@@ -1,4 +1,4 @@
-appId: com.palefire.writad
+appId: com.palefire.pilcrow
 ---
 # Robustly reset the buffer between test sections WITHOUT re-launching
 # the app. Defensive in three ways:

@@ -1,4 +1,4 @@
-appId: com.palefire.writad
+appId: com.palefire.pilcrow
 ---
 # Focus the editor and empty the buffer. Deliberately does NOT relaunch
 # the app — relaunching between every flow makes the Simulator window

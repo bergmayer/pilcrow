@@ -1,5 +1,12 @@
 import Foundation
 
+/// Data carried by a specific editor-window request. Unlike a process-global
+/// queue, SwiftUI delivers this value only to the scene created for it.
+enum EditorRoute: Codable, Hashable {
+    case newDocument
+    case restoreClosedWindow(UUID)
+}
+
 @MainActor
 @Observable
 final class SceneRouter {
@@ -11,6 +18,7 @@ final class SceneRouter {
     /// non-View callers to SwiftUI's `@Environment(\.openWindow)`,
     /// which can't be reached outside a View body.
     var openWindow: ((SceneID) -> Void)?
+    var openEditorWindow: ((EditorRoute) -> Void)?
 
     var pendingShortcut: HomeShortcut?
     var hasAppliedLaunchBehavior = false
@@ -26,6 +34,16 @@ final class SceneRouter {
 
     func deregisterSession(_ session: EditorSession) {
         sessionRegistry.removeAll { $0.ref == nil || $0.ref === session }
+    }
+
+    /// If the system closed the focused scene, move the global focus pointer
+    /// to a surviving editor so the post-close Restore banner has one stable
+    /// owner instead of appearing in every Stage Manager window.
+    func focusSurvivingSession(excludingSceneUUID sceneUUID: String) {
+        guard currentSession?.sceneUUID == sceneUUID else { return }
+        let replacement = allOpenSessions.last { $0.sceneUUID != sceneUUID }
+        currentSession = replacement
+        currentEditor = replacement?.activeTab.state
     }
 
     /// Read-only; never prune on read — that would be a write inside
@@ -99,6 +117,6 @@ enum SceneID: String {
 /// `rawValue` must match the `UIApplicationShortcutItemType` strings
 /// declared in Info.plist under `UIApplicationShortcutItems`.
 enum HomeShortcut: String {
-    case newFile        = "com.palefire.writad.shortcut.newFile"
-    case commandPalette = "com.palefire.writad.shortcut.commandPalette"
+    case newFile        = "com.palefire.pilcrow.shortcut.newFile"
+    case commandPalette = "com.palefire.pilcrow.shortcut.commandPalette"
 }

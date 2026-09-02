@@ -38,7 +38,7 @@ extension CommandActions {
     static func presentMultiFileSearch() {
         Self.context.scenes.requestOpenWindow(.multiFileSearch)
         if DeviceIdiom.isPhone {
-            Self.context.presentation.presentedSheet = .multiFileSearch
+            Self.context.presentation.present(.multiFileSearch, owner: Self.context.scenes.currentEditor)
         } else {
             Self.context.scenes.openWindow?(.multiFileSearch)
         }

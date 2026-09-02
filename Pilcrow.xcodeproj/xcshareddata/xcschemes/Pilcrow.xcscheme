@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "B6000001"
-               BuildableName = "Writad.app"
-               BlueprintName = "Writad"
-               ReferencedContainer = "container:Writad.xcodeproj">
+               BuildableName = "Pilcrow.app"
+               BlueprintName = "Pilcrow"
+               ReferencedContainer = "container:Pilcrow.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,17 +33,17 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "B6000002"
-               BuildableName = "WritadTests.xctest"
-               BlueprintName = "WritadTests"
-               ReferencedContainer = "container:Writad.xcodeproj">
+               BuildableName = "PilcrowTests.xctest"
+               BlueprintName = "PilcrowTests"
+               ReferencedContainer = "container:Pilcrow.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction
-      buildConfiguration = "Debug"
-      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
-      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      buildConfiguration = "Release"
+      selectedDebuggerIdentifier = ""
+      selectedLauncherIdentifier = "Xcode.IDEFoundation.Launcher.PosixSpawn"
       launchStyle = "0"
       useCustomWorkingDirectory = "NO"
       ignoresPersistentStateOnLaunch = "NO"
@@ -55,9 +55,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "B6000001"
-            BuildableName = "Writad.app"
-            BlueprintName = "Writad"
-            ReferencedContainer = "container:Writad.xcodeproj">
+            BuildableName = "Pilcrow.app"
+            BlueprintName = "Pilcrow"
+            ReferencedContainer = "container:Pilcrow.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -72,9 +72,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "B6000001"
-            BuildableName = "Writad.app"
-            BlueprintName = "Writad"
-            ReferencedContainer = "container:Writad.xcodeproj">
+            BuildableName = "Pilcrow.app"
+            BlueprintName = "Pilcrow"
+            ReferencedContainer = "container:Pilcrow.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

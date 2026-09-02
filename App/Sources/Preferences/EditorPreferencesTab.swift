@@ -29,6 +29,8 @@ private struct CheckboxRow: View {
 struct EditorPreferencesTab: View {
 
     @Bindable private var prefs = AppPreferencesStore.shared
+    @State private var appIcon = AppIconChoice.current
+    @State private var appIconErrorMessage: String?
 
     /// Int↔Double bridge — live editor/menu zoom callers use Int.
     private var fontSizeBinding: Binding<Int> {
@@ -88,6 +90,15 @@ struct EditorPreferencesTab: View {
                     ForEach(AppThemeName.allCases, id: \.self) { name in
                         Text(name.displayName).tag(name)
                     }
+                }
+                Picker("App Icon", selection: $appIcon) {
+                    ForEach(AppIconChoice.allCases) { choice in
+                        Text(choice.displayName).tag(choice)
+                    }
+                }
+                .disabled(!UIApplication.shared.supportsAlternateIcons)
+                .onChange(of: appIcon) { _, choice in
+                    changeAppIcon(to: choice)
                 }
             }
 
@@ -180,7 +191,7 @@ struct EditorPreferencesTab: View {
             } header: {
                 Text("On Save")
             } footer: {
-                Text("Applied each time the document is written to disk — including the debounced auto-save that fires ~800 ms after typing stops. BOM and line endings are handled per document via the encoding and line-ending pickers in the status bar.")
+                Text("Applied by Save and Save As. Recovery snapshots preserve the exact working buffer. BOM and line endings are handled per document via the encoding and line-ending pickers in the status bar.")
             }
 
             Section {
@@ -194,29 +205,31 @@ struct EditorPreferencesTab: View {
             } footer: {
                 Text("Files over the limit open in plain-text mode for snappy typing. Tree-sitter syntax highlighting, code folding, and the Markdown inline decorator are all skipped.")
             }
-
-            iCloudSection
         }
         // Default formStyle (insetGrouped). `.grouped` runs edge-to-edge,
         // which looks broken on iPhone where the sheet = screen width.
+        .alert("Couldn't Change App Icon", isPresented: Binding(
+            get: { appIconErrorMessage != nil },
+            set: { if !$0 { appIconErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(appIconErrorMessage ?? "Unknown error")
+        }
     }
 
-    /// Launcher always reads from both iCloud and local, so toggling sync
-    /// strands nothing — new content just stops landing in iCloud.
-    @ViewBuilder
-    private var iCloudSection: some View {
-        let signedIn = UbiquityContainer.isAvailable
-        Section {
-            Toggle("Sync via iCloud Drive", isOn: $prefs.iCloudSyncEnabled)
-                .disabled(!signedIn)
-        } header: {
-            Text("iCloud")
-        } footer: {
-            if signedIn {
-                Text("New drafts and template seeds are written to iCloud Drive and sync across your devices. Switching this off keeps existing iCloud files reachable in the launcher — new content just goes to local storage instead.")
-            } else {
-                Text("Sign in to iCloud and enable Drive in the system settings to sync drafts and templates across your devices.")
+    private func changeAppIcon(to choice: AppIconChoice) {
+        guard choice.alternateIconName != UIApplication.shared.alternateIconName else {
+            return
+        }
+        Task { @MainActor in
+            do {
+                try await UIApplication.shared.setAlternateIconName(choice.alternateIconName)
+            } catch {
+                appIcon = .current
+                appIconErrorMessage = error.localizedDescription
             }
         }
     }
+
 }

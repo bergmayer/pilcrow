@@ -354,7 +354,7 @@ unsigned tree_sitter_typst_external_scanner_serialize(
 	buffer[written++] = self->heading_level;
 	buffer[written++] = self->line_start;
 	buffer[written++] = self->raw_level;
-	return written;
+	return (unsigned)written;
 }
 
 void tree_sitter_typst_external_scanner_deserialize(

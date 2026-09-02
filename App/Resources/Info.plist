@@ -11,9 +11,9 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleDisplayName</key>
-	<string>writað</string>
+	<string>Pilcrow</string>
 	<key>CFBundleName</key>
-	<string>writað</string>
+	<string>Pilcrow</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -25,7 +25,7 @@
 
 	<!-- System-wide registration for text & Markdown. Each
 	     CFBundleDocumentTypes entry tells Springboard and the Files
-	     app "writað can edit these UTIs"; with
+	     app "Pilcrow can edit these UTIs"; with
 	     LSSupportsOpeningDocumentsInPlace = YES (below) we accept the
 	     URL hand-off directly instead of forcing an import-and-copy.
 	     The DocumentGroup-era FP -1005 bug that previously kept this
@@ -190,33 +190,16 @@
 		</dict>
 	</array>
 	<!-- Now ON: system-wide handler. Files app, share sheets, and the
-	     "Open with…" path will offer writað for any registered UTI and
+	     "Open with…" path will offer Pilcrow for any registered UTI and
 	     hand us the file URL directly. `.onOpenURL` in EditorScene
 	     receives it and routes through `route(open:)`. -->
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<!-- Allow the user to browse the app's Documents/ in Files (so
-	     drafts and saved-as files are reachable from outside the app)
+	     saved-as files and templates are reachable from outside the app)
 	     while still owning the document browser surface ourselves. -->
 	<key>UIFileSharingEnabled</key>
 	<true/>
-	<!-- iCloud Drive ubiquity container. Templates + drafts live in
-	     <container>/Documents/, which `NSUbiquitousContainerIsDocumentScopePublic`
-	     surfaces in the Files app as "writað" so the user can drag in
-	     their own templates and other apps can read the drafts. -->
-	<key>NSUbiquitousContainers</key>
-	<dict>
-		<key>iCloud.com.palefire.writad</key>
-		<dict>
-			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
-			<true/>
-			<key>NSUbiquitousContainerSupportedFolderLevels</key>
-			<string>Any</string>
-			<key>NSUbiquitousContainerName</key>
-			<string>writað</string>
-		</dict>
-	</dict>
-
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>
@@ -243,7 +226,7 @@
 	<array>
 		<dict>
 			<key>UIApplicationShortcutItemType</key>
-			<string>com.palefire.writad.shortcut.newFile</string>
+			<string>com.palefire.pilcrow.shortcut.newFile</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>New File</string>
 			<key>UIApplicationShortcutItemIconType</key>
@@ -251,7 +234,7 @@
 		</dict>
 		<dict>
 			<key>UIApplicationShortcutItemType</key>
-			<string>com.palefire.writad.shortcut.commandPalette</string>
+			<string>com.palefire.pilcrow.shortcut.commandPalette</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Command Palette</string>
 			<key>UIApplicationShortcutItemIconType</key>

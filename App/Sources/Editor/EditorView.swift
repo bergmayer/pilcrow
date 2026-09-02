@@ -323,26 +323,13 @@ struct EditorView: View {
         }
         state.reinterpretWithEncoding = { [weak state, weak document] newEncoding in
             guard let state, let document else { return }
-            guard let data = document.originalData else {
-                document.fileEncoding = newEncoding
-                state.fileEncoding = newEncoding
-                return
-            }
             do {
-                let (decoded, encoding) = try String.string(
-                    data: data,
-                    decodingStrategy: .specific(newEncoding.encoding)
-                )
-                document.text = decoded
-                document.fileEncoding = FileEncoding(
-                    encoding: encoding.encoding,
-                    withUTF8BOM: newEncoding.withUTF8BOM
-                )
+                let decoded = try document.reinterpretOriginalData(as: newEncoding)
                 state.text = decoded
                 state.fileEncoding = document.fileEncoding
             } catch {
-                document.fileEncoding = newEncoding
-                state.fileEncoding = newEncoding
+                AppStateBus.shared.presentation.openErrorMessage =
+                    "Couldn't reopen using \(newEncoding.localizedName): \(error.localizedDescription)"
             }
         }
     }
@@ -517,7 +504,7 @@ struct EditorView: View {
                     // inside the debounce window.
                     let live = state.textView?.text ?? document.text
                     state.lineEnding = lineEnding
-                    document.text = live.replacingLineEndings(with: lineEnding)
+                    replaceWholeBuffer(with: live.replacingLineEndings(with: lineEnding))
                 }
             )
         case .languagePicker:
@@ -533,7 +520,7 @@ struct EditorView: View {
             SortLinesSheet(
                 text: state.textView?.text ?? document.text,
                 lineEnding: document.lineEnding,
-                onApply: { sorted in document.text = sorted }
+                onApply: { sorted in replaceWholeBuffer(with: sorted) }
             )
         case .goToLine:
             GoToLineSheet(
@@ -550,10 +537,18 @@ struct EditorView: View {
             SnippetsManagerSheet()
         case .draftsRecovery:
             DraftsRecoverySheet()
+        case .templatePicker:
+            TemplatePickerSheet { template in
+                TemplateWorkflow.apply(
+                    template,
+                    document: document,
+                    state: state
+                )
+            }
         case .clipboardHistory:
             ClipboardHistorySheet()
         case .findReplace:
-            FindReplaceSheet()
+            FindReplaceSheet(editor: state)
         case .zapGremlins:
             ZapGremlinsSheet()
         case .revisions:
@@ -583,8 +578,24 @@ struct EditorView: View {
         case .organizeFootnotes:
             OrganizeFootnotesSheet()
         case .spellCheck:
-            SpellCheckSheet()
+            SpellCheckSheet(editor: state)
         }
+    }
+
+    /// Whole-buffer sheet actions must update the live engine (preserving
+    /// undo), the observable snapshot, and dirty/recovery bookkeeping.
+    private func replaceWholeBuffer(with newText: String) {
+        let oldText = state.textView?.text ?? document.text
+        guard oldText != newText else { return }
+        if let textView = state.textView {
+            let fullRange = NSRange(location: 0, length: (oldText as NSString).length)
+            textView.replace(fullRange, withText: newText)
+        } else {
+            document.bufferRevision &+= 1
+        }
+        document.text = newText
+        document.isDirty = true
+        state.text = newText
     }
 
     private func lineCount(in text: String) -> Int {

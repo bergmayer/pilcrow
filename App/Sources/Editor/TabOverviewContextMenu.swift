@@ -22,6 +22,12 @@ struct TabOverviewContextMenu: View {
         } label: {
             Label("Open New Tab", systemImage: "plus.square")
         }
+        Button {
+            claimFocus()
+            CommandActions.newFromTemplate()
+        } label: {
+            Label("New from Template…", systemImage: "doc.badge.plus")
+        }
         Divider()
         Button(role: .destructive) {
             claimFocus()

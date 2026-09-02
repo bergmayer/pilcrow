@@ -59,8 +59,10 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
 
     func textViewDidChange(_ textView: EditorEngine.TextView) {
         if isApplyingSiblingSync { return }
-        // Counter-only: observers that need the text pull it
-        // from the engine.
+        // This is the authoritative mutation callback. Undo/redo,
+        // indentation, line moves, and Replace All can bypass the
+        // preflight delegate, but they all finish here.
+        if !document.isDirty { document.isDirty = true }
         document.bufferRevision &+= 1
         scheduleBufferSnapshot(from: textView)
         foldCacheKey = nil
@@ -127,6 +129,7 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
 
     func textViewDidChangeSelection(_ textView: EditorEngine.TextView) {
         state.selectedRange = textView.selectedRange
+        guard let textView = textView as? PilcrowTextView else { return }
         if state.highlightMatchingBrackets {
             textView.refreshBracketMatchHighlight()
         } else {
@@ -219,16 +222,12 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
             }
         }
 
-        if !document.isDirty { document.isDirty = true }
-
-        // Sibling sync: cast the abstract `EditorActions` to the
-        // concrete engine view to reach the sibling coordinator
-        // and arm its recursion guard. Gated on the sibling view
+        // Sibling sync reaches the sibling coordinator to arm its
+        // recursion guard. Gated on the sibling view
         // existing, not `splitOpen` — that flag only lives on the
         // primary pane's state, so the secondary pane would skip
         // syncing its edits back.
-        if let siblingActions = state.siblingState?.textView,
-           let sibling = siblingActions as? EditorEngine.TextView,
+        if let sibling = state.siblingState?.textView,
            let siblingCoord = sibling.editorDelegate as? EditorTextViewCoordinator {
             siblingCoord.isApplyingSiblingSync = true
             sibling.replace(range, withText: text)

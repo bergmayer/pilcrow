@@ -35,32 +35,52 @@ extension CommandActions {
     /// session). iPad-only; iPhone is single-window and the system
     /// request is a no-op there.
     static func closeWindow(session: EditorSession? = nil) {
-        if let target = session ?? Self.session,
-           let scene = SessionsStore.shared.scene(forSceneUUID: target.sceneUUID) {
-            target.isClosingWindow = true
-            let closedRecords = target.tabs.map(EditorSession.snapshotRecord(of:))
-            for record in closedRecords {
-                ClosedTabsStore.shared.record(record)
+        let target = session ?? Self.session
+        Task { @MainActor in
+            if let target,
+               let scene = SessionsStore.shared.scene(forSceneUUID: target.sceneUUID) {
+                await closeWindow(target, scene: scene)
+            } else {
+                await destroyForegroundWindowScene()
             }
-            SessionsStore.shared.remove(forScene: target.sceneUUID)
-            UIApplication.shared.requestSceneSessionDestruction(
-                scene.session,
-                options: nil,
-                errorHandler: { error in
-                    Task { @MainActor in
-                        target.isClosingWindow = false
-                        closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
-                        SessionsStore.shared.save(
-                            SessionRecord(scene: target.sceneUUID, session: target)
-                        )
-                        Self.context.presentation.openErrorMessage =
-                            "Couldn't close the window: \(error.localizedDescription)"
-                    }
-                }
-            )
+        }
+    }
+
+    private static func closeWindow(_ target: EditorSession, scene: UIScene) async {
+        target.isClosingWindow = true
+        target.tabs.forEach { $0.state.textView?.resignFirstResponder() }
+        let closeArchive: ([ClosedTabRecord], ClosedWindowRecord?)
+        do {
+            closeArchive = try await archiveWindowBeforeClosing(target)
+        } catch {
+            target.isClosingWindow = false
+            Self.context.presentation.openErrorMessage =
+                "Couldn't preserve the window before closing: \(error.localizedDescription)"
             return
         }
-        destroyForegroundWindowScene()
+        let closedRecords = closeArchive.0
+        let archivedWindow = closeArchive.1
+        SessionsStore.shared.remove(forScene: target.sceneUUID)
+        Self.context.scenes.focusSurvivingSession(excludingSceneUUID: target.sceneUUID)
+        UIApplication.shared.requestSceneSessionDestruction(
+            scene.session,
+            options: nil,
+            errorHandler: { error in
+                Task { @MainActor in
+                    target.isClosingWindow = false
+                    Self.context.scenes.claimFocus(session: target)
+                    SessionsStore.shared.save(
+                        SessionRecord(scene: target.sceneUUID, session: target)
+                    )
+                    if let archivedWindow {
+                        ClosedWindowsStore.shared.cancelArchive(archivedWindow.id)
+                    }
+                    closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
+                    Self.context.presentation.openErrorMessage =
+                        "Couldn't close the window: \(error.localizedDescription)"
+                }
+            }
+        )
     }
 
     /// Last-resort fallback when the acting session's scene isn't
@@ -68,20 +88,32 @@ extension CommandActions {
     /// are simultaneously `.foregroundActive` and `connectedScenes`
     /// is unordered — this can pick the wrong window, so callers
     /// should go through `closeWindow(session:)`.
-    static func destroyForegroundWindowScene() {
+    static func destroyForegroundWindowScene() async {
         guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) else { return }
         let target = Self.context.scenes.allOpenSessions.first(where: {
             SessionsStore.shared.scene(forSceneUUID: $0.sceneUUID) === scene
         })
-        let closedRecords: [ClosedTabRecord]
-        if let target {
-            target.isClosingWindow = true
-            closedRecords = target.tabs.map(EditorSession.snapshotRecord(of:))
-            for record in closedRecords {
-                ClosedTabsStore.shared.record(record)
+        let closeArchive: ([ClosedTabRecord], ClosedWindowRecord?)
+        do {
+            if let target {
+                target.isClosingWindow = true
+                target.tabs.forEach { $0.state.textView?.resignFirstResponder() }
+                closeArchive = try await archiveWindowBeforeClosing(target)
+            } else {
+                closeArchive = ([], nil)
             }
-        } else {
-            closedRecords = []
+        } catch {
+            target?.isClosingWindow = false
+            Self.context.presentation.openErrorMessage =
+                "Couldn't preserve the window before closing: \(error.localizedDescription)"
+            return
+        }
+        let closedRecords = closeArchive.0
+        let archivedWindow = closeArchive.1
+        if let target {
+            Self.context.scenes.focusSurvivingSession(
+                excludingSceneUUID: target.sceneUUID
+            )
         }
         SessionsStore.shared.removeRecord(
             forPersistentIdentifier: scene.session.persistentIdentifier
@@ -93,16 +125,46 @@ extension CommandActions {
                 Task { @MainActor in
                     if let target {
                         target.isClosingWindow = false
-                        closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
+                        Self.context.scenes.claimFocus(session: target)
                         SessionsStore.shared.save(
                             SessionRecord(scene: target.sceneUUID, session: target)
                         )
+                        if let archivedWindow {
+                            ClosedWindowsStore.shared.cancelArchive(archivedWindow.id)
+                        }
+                        closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
                     }
                     Self.context.presentation.openErrorMessage =
                         "Couldn't close the window: \(error.localizedDescription)"
                 }
             }
         )
+    }
+
+    /// Pull exact live buffers and await their recovery writes before asking
+    /// UIKit to destroy the scene. Encoding and disk I/O run on the recovery
+    /// writer actor, not the main actor.
+    private static func archiveWindowBeforeClosing(
+        _ target: EditorSession
+    ) async throws -> ([ClosedTabRecord], ClosedWindowRecord?) {
+        try await DraftsStore.shared.withCapEnforcementSuspended {
+            for tab in target.tabs where tab.document.isDirty {
+                if let live = tab.state.textView?.text {
+                    tab.document.text = live
+                }
+                try await tab.document.commitRecoverySnapshot()
+            }
+        }
+
+        let closedRecords = target.tabs.map(EditorSession.snapshotRecord(of:))
+        closedRecords.forEach { ClosedTabsStore.shared.record($0) }
+        let sessionRecord = SessionRecord(scene: target.sceneUUID, session: target)
+        let archivedWindow = ClosedWindowsStore.shared.archive(
+            sessionRecord,
+            closedTabRecordIDs: closedRecords.map(\.id)
+        )
+        DraftsStore.shared.enforceCapNow()
+        return (closedRecords, archivedWindow)
     }
 
     /// Single entry point so every UI surface (pill ×, swipe-to-
@@ -158,13 +220,20 @@ extension CommandActions {
     /// force a draft snapshot of the live text so the launcher can
     /// resume it, then close (archive disposition — both the draft
     /// and the closed-tab record become recovery vehicles). Same
-    /// shape as autoSave but synchronous to the user's tap so we
-    /// don't lose the last keystroke when the debounce hadn't fired.
+    /// The close awaits the committed write so the last keystroke cannot be
+    /// lost when the debounce has not fired yet.
     static func saveAsDraftAndClose(_ pending: PendingClose) {
-        defer { Self.context.presentation.pendingClose = nil }
         guard let (session, tab) = Self.resolveSession(for: pending) else { return }
-        snapshotDraft(for: tab)
-        session.closeTab(pending.tabID)
+        Task { @MainActor in
+            defer { Self.context.presentation.pendingClose = nil }
+            do {
+                try await snapshotDraft(for: tab, endEditing: true)
+                session.closeTab(pending.tabID)
+            } catch {
+                Self.context.presentation.openErrorMessage =
+                    "Couldn't save the recovery draft: \(error.localizedDescription)"
+            }
+        }
     }
 
     /// Title-menu / palette entry — captures the buffer into the
@@ -173,17 +242,27 @@ extension CommandActions {
         guard let session = Self.context.scenes.currentSession,
               let tab = session.tabs.first(where: { $0.id == session.selectedTabID })
         else { return }
-        snapshotDraft(for: tab)
+        Task { @MainActor in
+            do {
+                try await snapshotDraft(for: tab, endEditing: false)
+            } catch {
+                Self.context.presentation.openErrorMessage =
+                    "Couldn't save the recovery draft: \(error.localizedDescription)"
+            }
+        }
     }
 
-    private static func snapshotDraft(for tab: TabModel) {
+    private static func snapshotDraft(for tab: TabModel, endEditing: Bool) async throws {
+        if endEditing {
+            tab.state.textView?.resignFirstResponder()
+        }
         if let live = tab.state.textView?.text {
             tab.document.text = live
         }
-        // commitDraft: the user is closing or explicitly Save-as-
-        // Drafting, so push the live bytes to the synced folder
-        // — the per-keystroke path skips this.
-        tab.document.autoSave(commitDraft: true)
+        // The user is closing or explicitly Save-as-Drafting, so commit the
+        // live bytes to device-local recovery; per-keystroke autosave only
+        // updates scratch.
+        try await tab.document.commitRecoverySnapshot()
     }
 
     static func cancelPendingClose() {
@@ -292,12 +371,17 @@ extension CommandActions {
     }
 
     private static func performSave(tab: TabModel) -> Bool {
-        if let live = tab.state.textView?.text {
-            tab.document.text = live
+        let live = tab.state.textView?.text ?? tab.document.text
+        let prepared = tab.document.preparedTextForSaving(live)
+        if prepared != live, let textView = tab.state.textView {
+            let fullRange = NSRange(location: 0, length: (live as NSString).length)
+            textView.replace(fullRange, withText: prepared)
         }
+        tab.document.text = prepared
+        tab.state.text = prepared
         do {
             try tab.document.save()
-            tab.state.savedBaselineText = tab.document.text
+            tab.state.savedBaselineText = prepared
             return true
         } catch {
             Self.context.presentation.openErrorMessage =
@@ -378,6 +462,19 @@ extension CommandActions {
                 context.presentation.openErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Restore a closed tab group into its own scene. The archive remains
+    /// durable until the new EditorScene consumes it, so a failed or delayed
+    /// window request cannot orphan the underlying recovery drafts.
+    static func recoverClosedWindow(_ record: ClosedWindowRecord) {
+        guard let openEditorWindow = Self.context.scenes.openEditorWindow else {
+            Self.context.presentation.openErrorMessage =
+                "A new window isn't available yet. The recovered window was kept so you can try again."
+            return
+        }
+        ClosedWindowsStore.shared.dismissNotice()
+        openEditorWindow(.restoreClosedWindow(record.id))
     }
 
     // MARK: - Duplicate / rename
@@ -532,12 +629,19 @@ extension CommandActions {
     /// untitled goes to the recovery pool), then close everything
     /// with `.archive` disposition so ⇧⌘T can resurrect them too.
     static func confirmBatchSaveAsDrafts(_ pending: PendingBatchClose) {
-        defer { Self.context.presentation.pendingBatchClose = nil }
         guard let session = resolveSession(for: pending) else { return }
-        for tabID in pending.tabIDs {
-            guard let tab = session.tabs.first(where: { $0.id == tabID }) else { continue }
-            snapshotDraft(for: tab)
-            session.closeTab(tabID)
+        Task { @MainActor in
+            defer { Self.context.presentation.pendingBatchClose = nil }
+            do {
+                for tabID in pending.tabIDs {
+                    guard let tab = session.tabs.first(where: { $0.id == tabID }) else { continue }
+                    try await snapshotDraft(for: tab, endEditing: true)
+                    session.closeTab(tabID)
+                }
+            } catch {
+                Self.context.presentation.openErrorMessage =
+                    "Couldn't save all recovery drafts: \(error.localizedDescription)"
+            }
         }
     }
 

@@ -190,13 +190,37 @@ struct WindowToolbar: View {
             bareButton(symbol: "arrow.uturn.backward", help: "Undo") {
                 CommandActions.undo()
             }
-            bareButton(symbol: "plus.square", help: "New Tab") {
-                CommandActions.newTab()
-            }
+            newDocumentButton
             bareButton(symbol: "command.square", help: "Command Palette") {
                 CommandActions.presentCommandPalette()
             }
         }
+    }
+
+    /// Tap creates a blank tab; press-and-hold exposes the explicit
+    /// template path without slowing down the common New action.
+    @ViewBuilder
+    private var newDocumentButton: some View {
+        Menu {
+            Button {
+                onInteraction?()
+                CommandActions.newFromTemplate()
+            } label: {
+                Label("New from Template…", systemImage: "doc.badge.plus")
+            }
+        } label: {
+            Image(systemName: "plus.square")
+                .font(.system(size: Self.buttonSize * 0.5, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .frame(width: Self.touchTarget, height: Self.touchTarget)
+                .contentShape(.rect)
+        } primaryAction: {
+            onInteraction?()
+            CommandActions.newTab()
+        }
+        .menuStyle(.borderlessButton)
+        .help("New")
+        .accessibilityLabel("New")
     }
 
     @ViewBuilder

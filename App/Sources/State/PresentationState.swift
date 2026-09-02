@@ -4,12 +4,25 @@ import Foundation
 @Observable
 final class PresentationState {
 
-    var presentedSheet: EditorSheet?
+    var presentedSheet: EditorSheet? {
+        didSet {
+            if presentedSheet == nil { presentedSheetOwner = nil }
+        }
+    }
+    /// Stable owner for editor-scoped sheets. Window focus can change while
+    /// a sheet is visible under Stage Manager; its actions must not follow
+    /// the global focus pointer into another document.
+    weak var presentedSheetOwner: EditorState?
     var revertRequestCount: Int = 0
     var openErrorMessage: String?
     var pendingClose: PendingClose?
     var pendingBatchClose: PendingBatchClose?
     var sourceStaleCheck: SourceStaleCheck?
+
+    func present(_ sheet: EditorSheet, owner: EditorState?) {
+        presentedSheetOwner = owner
+        presentedSheet = sheet
+    }
 }
 
 /// What the user has to resolve before continuing.

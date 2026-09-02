@@ -74,10 +74,6 @@ final class LineNumberView: UIView, ReusableView {
         addSubview(foldIndicatorLabel)
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleFoldTap))
         foldIndicatorLabel.addGestureRecognizer(tap)
-        // iPad pointer hover: show the lift-style highlight so users see the
-        // triangle is clickable. Without this, mouse/trackpad clicks land in
-        // the same place but with no visual affordance.
-        foldIndicatorLabel.addInteraction(UIPointerInteraction(delegate: nil))
     }
 
     required init?(coder: NSCoder) {

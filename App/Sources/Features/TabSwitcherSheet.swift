@@ -66,6 +66,7 @@ struct TabSwitcherView: View {
             plusMenu
             Spacer()
             Button {
+                AppStateBus.shared.scenes.claimFocus(session: session)
                 onDismiss()
             } label: {
                 Image(systemName: "checkmark")
@@ -128,6 +129,16 @@ struct TabSwitcherView: View {
     @ViewBuilder
     private var plusMenu: some View {
         Menu {
+            Button {
+                onDismiss()
+                Task { @MainActor in
+                    try? await Task.sleep(for: Timing.paletteHandoff)
+                    CommandActions.newFromTemplate()
+                }
+            } label: {
+                Label("New from Template…", systemImage: "doc.badge.plus")
+            }
+            Divider()
             if session.recentlyClosed.isEmpty {
                 Text("No Recently Closed Tabs")
             } else {
@@ -147,9 +158,9 @@ struct TabSwitcherView: View {
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 36, height: 36)
         } primaryAction: {
-            // Dismiss the switcher first, then route through
-            // CommandActions so the drafts-recovery sheet (if any
-            // drafts exist) replaces the switcher animation cleanly.
+            // Dismiss the switcher first so the blank editor appears
+            // after the switcher animation completes.
+            AppStateBus.shared.scenes.claimFocus(session: session)
             onDismiss()
             Task { @MainActor in
                 try? await Task.sleep(for: Timing.paletteHandoff)

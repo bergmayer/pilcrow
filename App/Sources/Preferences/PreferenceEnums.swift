@@ -1,4 +1,42 @@
 import Foundation
+import UIKit
+
+enum AppIconChoice: String, CaseIterable, Identifiable {
+    case forest
+    case burgundy
+    case indigo
+    case ochre
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .forest: "Forest"
+        case .burgundy: "Burgundy"
+        case .indigo: "Indigo"
+        case .ochre: "Ochre"
+        }
+    }
+
+    var alternateIconName: String? {
+        switch self {
+        case .forest: nil
+        case .burgundy: "AppIconBurgundy"
+        case .indigo: "AppIconIndigo"
+        case .ochre: "AppIconOchre"
+        }
+    }
+
+    @MainActor
+    static var current: AppIconChoice {
+        switch UIApplication.shared.alternateIconName {
+        case "AppIconBurgundy": .burgundy
+        case "AppIconIndigo": .indigo
+        case "AppIconOchre": .ochre
+        default: .forest
+        }
+    }
+}
 
 /// Upper byte-size for syntax highlighting, fold discovery, and
 /// the markdown inline decorator. Files over the limit open in
@@ -40,4 +78,3 @@ enum SyntaxLimit: Int, CaseIterable, Identifiable {
         SyntaxLimit(rawValue: AppPreferencesStore.shared.syntaxLimitBytes) ?? .up5MB
     }
 }
-

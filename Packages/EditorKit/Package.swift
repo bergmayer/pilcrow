@@ -6,7 +6,7 @@
 //     of upstream code; see LICENSE files for attribution).
 //   • EditorCore subset — utility libraries we use: FileEncoding, LineEnding,
 //     LineSort, CharacterInfo, plus transitive deps StringUtils and ValueRange.
-//   • WritadSyntax — the bridge wiring tree-sitter language grammars into
+//   • PilcrowSyntax — the bridge wiring tree-sitter language grammars into
 //     EditorEngine.
 //
 // The app target depends on this single local package instead of several.
@@ -25,7 +25,7 @@ let package = Package(
         .library(name: "LineEnding",    targets: ["LineEnding"]),
         .library(name: "LineSort",      targets: ["LineSort"]),
         .library(name: "CharacterInfo", targets: ["CharacterInfo"]),
-        .library(name: "WritadSyntax",   targets: ["WritadSyntax"])
+        .library(name: "PilcrowSyntax",   targets: ["PilcrowSyntax"])
     ],
     dependencies: [
         .package(url: "https://github.com/tree-sitter/tree-sitter", .upToNextMinor(from: "0.20.9")),
@@ -90,10 +90,10 @@ let package = Package(
 
         .target(name: "CharacterInfo"),
 
-        // MARK: WritadSyntax — tree-sitter ↔ editor bridge
+        // MARK: PilcrowSyntax — tree-sitter ↔ editor bridge
 
         .target(
-            name: "WritadSyntax",
+            name: "PilcrowSyntax",
             dependencies: [
                 "EditorEngine",
                 .product(name: "TreeSitter",            package: "tree-sitter"),

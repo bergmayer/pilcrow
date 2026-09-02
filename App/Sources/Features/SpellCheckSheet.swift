@@ -7,6 +7,7 @@ import SwiftUI
 struct SpellCheckSheet: View {
 
     @Environment(\.dismiss) private var dismiss
+    let editor: EditorState
 
     /// Range of the current flagged word in the document, or `nil`
     /// when the walk has finished (or never found anything).
@@ -16,8 +17,8 @@ struct SpellCheckSheet: View {
     @State private var replacement: String = ""
     @State private var finished: Bool = false
 
-    private var actions: (any EditorActions)? {
-        AppStateBus.shared.scenes.currentEditor?.textView
+    private var actions: PilcrowTextView? {
+        editor.textView
     }
 
     /// Where the walk-through begins. If the caret sits inside a
@@ -25,7 +26,6 @@ struct SpellCheckSheet: View {
     /// rewind to the start of the word so `nextMisspelling(from:)`
     /// returns *that* word and not the one after it.
     private var startLocation: Int {
-        guard let editor = AppStateBus.shared.scenes.currentEditor else { return 0 }
         let cursor = editor.selectedRange.location
         if let containing = editor.textView?.misspellingRange(at: cursor) {
             return containing.location
@@ -101,7 +101,10 @@ struct SpellCheckSheet: View {
                     Button(finished ? "Done" : "Stop") { dismiss() }
                 }
             }
-            .onAppear { findNext(from: startLocation) }
+            .onAppear {
+                AppStateBus.shared.scenes.claimFocus(state: editor)
+                findNext(from: startLocation)
+            }
         }
     }
 

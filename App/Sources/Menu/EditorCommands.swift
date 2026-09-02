@@ -34,7 +34,7 @@ struct EditorCommands: Commands {
         if let focusedPresenter {
             focusedPresenter(sheet)
         } else {
-            bus.presentation.presentedSheet = sheet
+            bus.presentation.present(sheet, owner: editorState)
         }
     }
 
@@ -103,6 +103,9 @@ struct EditorCommands: Commands {
                 Label("New Tab", systemImage: "rectangle.stack.badge.plus")
             }
             .keyboardShortcut(AppShortcut.newTab)
+            Button(action: focused(CommandActions.newFromTemplate)) {
+                Label("New from Template…", systemImage: "doc.badge.plus")
+            }
             // Unshortcut'd: `LSSupportsOpeningDocumentsInPlace = YES`
             // makes iPadOS auto-inject its own ⌘O "Open…" at the
             // system level (action `open:`); binding ours to the
@@ -145,7 +148,7 @@ struct EditorCommands: Commands {
             .keyboardShortcut(AppShortcut.showRevisions)
             .disabled(!isEnabled)
             Button(action: { presentSheet(.draftsRecovery) }) {
-                Label("Recover Unsaved Drafts…", systemImage: "tray.full")
+                Label("Recoverable Work…", systemImage: "tray.full")
             }
             Divider()
             Button(action: focused(CommandActions.speakSelection)) {

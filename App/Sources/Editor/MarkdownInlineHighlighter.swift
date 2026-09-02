@@ -2,15 +2,7 @@ import Foundation
 import UIKit
 import EditorEngine
 
-/// Inline-Markdown highlighter. Block-level markup (`# Heading`, lists,
-/// quotes, fences) and inline markup (`*emphasis*`, `**strong**`,
-/// `` `code` ``, `[label](url)`) are recognised here via a small line-scoped
-/// regex sweep and coloured by looking the rule's capture name up against
-/// the active `Theme` — the same palette tree-sitter uses, so light/dark
-/// follow the rest of the editor automatically.
-///
-/// Runs after the engine's per-line syntax highlight as
-/// `TextView.attributeDecorator`.
+/// Adds line-scoped Markdown attributes after syntax highlighting.
 @MainActor
 enum MarkdownInlineHighlighter {
 
@@ -27,8 +19,6 @@ enum MarkdownInlineHighlighter {
     }
 
     static func decorate(_ attributed: NSMutableAttributedString, theme: Theme) {
-        // Fast-path: most lines have no markdown markers. Bail before the
-        // regex sweep when the line carries none of the trigger characters.
         guard attributed.string.rangeOfCharacter(from: Self.triggers) != nil else { return }
         let fullRange = NSRange(location: 0, length: (attributed.string as NSString).length)
         for rule in rules {
@@ -74,13 +64,9 @@ enum MarkdownInlineHighlighter {
     private struct Rule {
         let regex: NSRegularExpression
         let captureGroup: Int
-        /// Tree-sitter-style capture name. Looked up via `Theme.textColor(for:)`
-        /// and `Theme.fontTraits(for:)` so light/dark/user themes apply.
         let highlightName: String
     }
 
-    /// Patterns are compile-time constants — a throw here is a programmer
-    /// bug, not a runtime condition.
     private static func rule(_ pattern: String, group: Int = 0, name: String) -> Rule {
         do {
             return Rule(regex: try NSRegularExpression(pattern: pattern), captureGroup: group, highlightName: name)
@@ -89,8 +75,6 @@ enum MarkdownInlineHighlighter {
         }
     }
 
-    /// Cheap pre-filter — any of these means "maybe markdown markup on
-    /// this line"; their absence guarantees no rule will match.
     private static let triggers: CharacterSet = CharacterSet(charactersIn: "*_`#>[=-+~")
 
     // Earlier rules paint broad spans (headings paint the whole line),
