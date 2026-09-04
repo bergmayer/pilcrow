@@ -676,3 +676,42 @@ final class SessionsStoreTests: XCTestCase {
         )
     }
 }
+
+final class WindowKeyboardGeometryTests: XCTestCase {
+
+    func test_dockedKeyboardReturnsOnlyItsWindowOverlap() {
+        let overlap = WindowKeyboardGeometry.bottomOverlap(
+            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 700),
+            keyboardFrame: CGRect(x: -200, y: 520, width: 1_400, height: 380)
+        )
+
+        XCTAssertEqual(overlap, 180)
+    }
+
+    func test_keyboardBelowWindowDoesNotMoveStatusBar() {
+        let overlap = WindowKeyboardGeometry.bottomOverlap(
+            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 500),
+            keyboardFrame: CGRect(x: -200, y: 520, width: 1_400, height: 380)
+        )
+
+        XCTAssertEqual(overlap, 0)
+    }
+
+    func test_floatingKeyboardDoesNotMoveFullWidthStatusBar() {
+        let overlap = WindowKeyboardGeometry.bottomOverlap(
+            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 700),
+            keyboardFrame: CGRect(x: 560, y: 430, width: 300, height: 270)
+        )
+
+        XCTAssertEqual(overlap, 0)
+    }
+
+    func test_nonBottomIntersectionDoesNotMoveStatusBar() {
+        let overlap = WindowKeyboardGeometry.bottomOverlap(
+            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 700),
+            keyboardFrame: CGRect(x: 0, y: 300, width: 900, height: 200)
+        )
+
+        XCTAssertEqual(overlap, 0)
+    }
+}

@@ -24,13 +24,16 @@ struct EditorView: View {
     /// cumulative, so deltas must apply against this anchor, not the
     /// already-updated live fraction.
     @State private var dividerDragStartFraction: CGFloat?
+    /// SwiftUI's keyboard safe area is shared too broadly under iPad
+    /// multiwindow. Track only the keyboard overlap for this view's key
+    /// window so background scenes keep their chrome at the window edge.
+    @State private var keyboardOverlap: CGFloat = 0
+
     var body: some View {
         observeStateForEngineUpdates()
-        // Editor ignores keyboard safe area; UITextView's own contentInset
-        // scrolls the cursor in. Status bar is a separate ZStack layer
-        // that DOES respect keyboard safe area, so SwiftUI lifts only it.
-        // VStack + bottom-padding had visibly squashed the editor on iPad
-        // portrait.
+        // The editor ignores the process-wide SwiftUI keyboard safe area;
+        // UITextView scrolls the cursor itself. A window-local UIKit bridge
+        // lifts only this key window's status bar by its actual overlap.
         return ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 // No transition between launcher and editor: nav title +
@@ -45,12 +48,19 @@ struct EditorView: View {
                 }
                 .frame(maxHeight: .infinity)
             }
-            .ignoresSafeArea(.keyboard, edges: .bottom)
 
             if state.showStatusBar {
                 EditorStatusBar(document: document, state: state)
+                    .padding(.bottom, keyboardOverlap)
+                    .animation(.easeOut(duration: 0.25), value: keyboardOverlap)
             }
         }
+        .background {
+            WindowKeyboardOverlapReader { overlap in
+                keyboardOverlap = overlap
+            }
+        }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         // Non-modal so the editor stays editable while the user browses
         // metadata or the outline.
         .inspector(isPresented: Binding(
@@ -604,5 +614,140 @@ struct EditorView: View {
 
     private func goToLine(_ line: Int) {
         state.textView?.goToLine(line)
+    }
+}
+
+// MARK: - Window-local keyboard overlap
+
+/// Reports the docked keyboard's overlap with this specific editor view.
+/// SwiftUI's keyboard safe area can leak from the key Stage Manager window
+/// into sibling scenes; UIKit gives us the notification frame and the owning
+/// window needed to keep the calculation scene-local.
+struct WindowKeyboardOverlapReader: UIViewRepresentable {
+
+    let onChange: @MainActor (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> WindowKeyboardOverlapView {
+        WindowKeyboardOverlapView(onChange: onChange)
+    }
+
+    func updateUIView(_ view: WindowKeyboardOverlapView, context: Context) {
+        view.onChange = onChange
+        view.refreshOverlap()
+    }
+}
+
+@MainActor
+final class WindowKeyboardOverlapView: UIView {
+
+    var onChange: @MainActor (CGFloat) -> Void
+
+    private var keyboardFrameInScreen: CGRect?
+    private var lastReportedOverlap: CGFloat = -1
+
+    init(onChange: @escaping @MainActor (CGFloat) -> Void) {
+        self.onChange = onChange
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(keyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(keyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(windowKeyStateChanged(_:)),
+            name: UIWindow.didBecomeKeyNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(windowKeyStateChanged(_:)),
+            name: UIWindow.didResignKeyNotification,
+            object: nil
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        refreshOverlap()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        refreshOverlap()
+    }
+
+    @objc private func keyboardWillChangeFrame(_ notification: Notification) {
+        keyboardFrameInScreen = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
+        refreshOverlap()
+    }
+
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        keyboardFrameInScreen = nil
+        refreshOverlap()
+    }
+
+    @objc private func windowKeyStateChanged(_ notification: Notification) {
+        guard notification.object as? UIWindow === window else { return }
+        refreshOverlap()
+    }
+
+    func refreshOverlap() {
+        let overlap: CGFloat
+        if let window,
+           window.isKeyWindow,
+           let keyboardFrameInScreen {
+            let localKeyboardFrame = convert(
+                keyboardFrameInScreen,
+                from: window.screen.coordinateSpace
+            )
+            overlap = WindowKeyboardGeometry.bottomOverlap(
+                viewBounds: bounds,
+                keyboardFrame: localKeyboardFrame
+            )
+        } else {
+            overlap = 0
+        }
+
+        guard abs(overlap - lastReportedOverlap) > 0.5 else { return }
+        lastReportedOverlap = overlap
+        DispatchQueue.main.async { [weak self] in
+            self?.onChange(overlap)
+        }
+    }
+}
+
+enum WindowKeyboardGeometry {
+
+    /// Floating keyboards do not move full-width chrome. Only a keyboard
+    /// intersecting the view's bottom edge contributes an overlap.
+    static func bottomOverlap(viewBounds: CGRect, keyboardFrame: CGRect) -> CGFloat {
+        let intersection = viewBounds.intersection(keyboardFrame)
+        guard !viewBounds.isEmpty,
+              !intersection.isNull,
+              keyboardFrame.maxY >= viewBounds.maxY - 1,
+              intersection.width >= viewBounds.width * 0.5
+        else { return 0 }
+
+        return intersection.height
     }
 }
