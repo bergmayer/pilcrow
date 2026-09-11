@@ -27,6 +27,9 @@ public protocol TextViewDelegate: AnyObject {
     /// Tells the delegate when the user changes the text in the text view.
     /// - Parameter textView: The text view containing the changes.
     func textViewDidChange(_ textView: TextView)
+    /// Reports the actual edit, including undo, batch replacement, and
+    /// marked text. `range` is measured in UTF-16 in the pre-edit buffer.
+    func textView(_ textView: TextView, didReplaceTextIn range: NSRange, replacementText text: String)
     /// Tells the delegate when the text selection changes in the text view.
     /// - Parameter textView: The text view whose selection changed.
     ///
@@ -117,6 +120,8 @@ public extension TextViewDelegate {
     func textViewDidEndEditing(_ textView: TextView) {}
 
     func textViewDidChange(_ textView: TextView) {}
+
+    func textView(_ textView: TextView, didReplaceTextIn range: NSRange, replacementText text: String) {}
 
     func textViewDidChangeSelection(_ textView: TextView) {}
 

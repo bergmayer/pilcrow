@@ -15,6 +15,9 @@ final class AppPreferencesStore {
     var ligatures: Bool   { didSet { write(AppPreferenceKey.ligatures, ligatures) } }
 
     // MARK: Editor display
+    var documentTabAppearance: DocumentTabAppearance {
+        didSet { write(AppPreferenceKey.documentTabAppearance, documentTabAppearance.rawValue) }
+    }
     var showLineNumbers: Bool        { didSet { write(AppPreferenceKey.showLineNumbers, showLineNumbers) } }
     var wrapLines: Bool              { didSet { write(AppPreferenceKey.wrapLines, wrapLines) } }
     var highlightCurrentLine: Bool   { didSet { write(AppPreferenceKey.highlightCurrentLine, highlightCurrentLine) } }
@@ -58,6 +61,12 @@ final class AppPreferencesStore {
     var saveUTF8BOM: Bool                 { didSet { write(AppPreferenceKey.saveUTF8BOM, saveUTF8BOM) } }
 
     // MARK: Defaults for new documents
+    var newWindowContent: NewDocumentContent {
+        didSet { write(AppPreferenceKey.newWindowContent, newWindowContent.rawValue) }
+    }
+    var newTabContent: NewDocumentContent {
+        didSet { write(AppPreferenceKey.newTabContent, newTabContent.rawValue) }
+    }
     var defaultEncodingRaw: Int      { didSet { write(AppPreferenceKey.defaultEncodingRaw, defaultEncodingRaw) } }
     var defaultLineEndingRaw: String { didSet { write(AppPreferenceKey.defaultLineEndingRaw, defaultLineEndingRaw) } }
     var defaultLanguage: String      { didSet { write(AppPreferenceKey.defaultLanguage, defaultLanguage) } }
@@ -73,6 +82,9 @@ final class AppPreferencesStore {
         lineHeight = AppPreferencesStore.positiveDouble(d, AppPreferenceKey.lineHeight, fallback: 1.2)
         ligatures = d.bool(forKey: AppPreferenceKey.ligatures)
 
+        documentTabAppearance =
+            d.string(forKey: AppPreferenceKey.documentTabAppearance)
+            .flatMap(DocumentTabAppearance.init(rawValue:)) ?? .tabBar
         showLineNumbers = d.bool(forKey: AppPreferenceKey.showLineNumbers)
         wrapLines = d.bool(forKey: AppPreferenceKey.wrapLines)
         highlightCurrentLine = d.bool(forKey: AppPreferenceKey.highlightCurrentLine)
@@ -110,6 +122,12 @@ final class AppPreferencesStore {
         trimTrailingWhitespaceOnSave = d.bool(forKey: AppPreferenceKey.trimTrailingWhitespaceOnSave)
         saveUTF8BOM = d.bool(forKey: AppPreferenceKey.saveUTF8BOM)
 
+        newWindowContent =
+            d.string(forKey: AppPreferenceKey.newWindowContent)
+            .flatMap(NewDocumentContent.init(rawValue:)) ?? .startPage
+        newTabContent =
+            d.string(forKey: AppPreferenceKey.newTabContent)
+            .flatMap(NewDocumentContent.init(rawValue:)) ?? .blankDocument
         defaultEncodingRaw = AppPreferencesStore.positiveInt(d, AppPreferenceKey.defaultEncodingRaw, fallback: Int(String.Encoding.utf8.rawValue))
         defaultLineEndingRaw = d.string(forKey: AppPreferenceKey.defaultLineEndingRaw) ?? "\n"
         defaultLanguage = d.string(forKey: AppPreferenceKey.defaultLanguage) ?? LanguageIdentifier.markdown.rawValue

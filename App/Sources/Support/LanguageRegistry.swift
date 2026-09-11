@@ -59,6 +59,14 @@ enum LanguageRegistry {
         return all.first { $0.extensions.contains(ext) }?.identifier ?? .plain
     }
 
+    /// The native exporter accepts arbitrary text extensions; suggest one
+    /// for an untitled document without changing a user-provided suffix.
+    static func suggestedFilename(_ title: String, language: LanguageIdentifier) -> String {
+        guard (title as NSString).pathExtension.isEmpty else { return title }
+        let suffix = all.first { $0.identifier == language }?.extensions.first ?? "txt"
+        return title + "." + suffix
+    }
+
     /// Display name for an identifier — useful for the status bar and menus.
     static func displayName(for identifier: LanguageIdentifier) -> String {
         all.first { $0.identifier == identifier }?.displayName ?? "Plain Text"

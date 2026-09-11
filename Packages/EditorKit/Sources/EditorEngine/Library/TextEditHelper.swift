@@ -42,18 +42,19 @@ final class TextEditHelper {
     }
 
     func string(byApplying batchReplaceSet: BatchReplaceSet) -> NSString {
-        let sortedReplacements = batchReplaceSet.replacements.sorted { $0.range.lowerBound < $1.range.lowerBound }
-        // swiftlint:disable:next force_cast
-        let mutableSubstring = stringView.string.mutableCopy() as! NSMutableString
-        var totalChangeInLength = 0
-        var replacedRanges: [NSRange] = []
-        for replacement in sortedReplacements where !replacedRanges.contains(where: { $0.overlaps(replacement.range) }) {
+        let replacements = batchReplaceSet.replacements.sorted { $0.range.location < $1.range.location }
+        let source = stringView.string
+        let result = NSMutableString()
+        var cursor = 0
+        for replacement in replacements {
             let range = replacement.range
-            let adjustedRange = NSRange(location: range.location + totalChangeInLength, length: range.length)
-            mutableSubstring.replaceCharacters(in: adjustedRange, with: replacement.text)
-            replacedRanges.append(replacement.range)
-            totalChangeInLength += replacement.text.utf16.count - adjustedRange.length
+            guard range.location >= cursor, range.location <= source.length,
+                  range.length >= 0, range.length <= source.length - range.location else { continue }
+            result.append(source.substring(with: NSRange(location: cursor, length: range.location - cursor)))
+            result.append(replacement.text)
+            cursor = NSMaxRange(range)
         }
-        return mutableSubstring
+        result.append(source.substring(from: cursor))
+        return result
     }
 }

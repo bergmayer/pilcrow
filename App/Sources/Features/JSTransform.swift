@@ -1,5 +1,5 @@
 import SwiftUI
-import JavaScriptCore
+import struct EditorEngine.BatchReplaceSet
 import UIKit
 
 // MARK: - Model
@@ -123,79 +123,34 @@ final class JSTransformStore {
 
 // MARK: - Execution
 
-/// Runs a slot's JavaScript against the slot's scoped input and writes
-/// the result back to the editor. Captured exceptions surface through
-/// `bus.presentation.openErrorMessage` rather than crashing the JSContext.
+/// A transform owns one captured buffer and selection. Its result is applied
+/// only if that buffer and selection are still current when the worker finishes.
 @MainActor
 enum JSTransformRunner {
-
     static func run(_ slot: JSTransformSlot) {
-        guard slot.isConfigured else { return }
-        guard let textView = AppStateBus.shared.scenes.currentEditor?.textView else { return }
-
-        let (input, replaceRange): (String, NSRange) = {
-            switch slot.scope {
-            case .document:
-                return (textView.text, NSRange(location: 0, length: (textView.text as NSString).length))
-            case .selection:
-                let sel = textView.selectedRange
-                guard sel.length > 0, let s = textView.text(in: sel) else {
-                    // Fall through with empty input; user gets ""
-                    // — they can still produce output that we'll
-                    // insert at the cursor.
-                    return ("", sel)
+        guard slot.isConfigured, let state = CommandActions.state,
+              let editor = state.textView, state.transformTask == nil else { return }
+        let source = editor.text
+        let selection = editor.selectedRange
+        let range = slot.scope == .document ? NSRange(location: 0, length: (source as NSString).length) : selection
+        let input = (source as NSString).substring(with: range)
+        state.operationError = nil
+        state.transformTask = Task { @MainActor [weak state, weak editor] in
+            defer { state?.transformTask = nil }
+            do {
+                let worker = JavaScriptWorker()
+                let output = try await worker.evaluate(code: slot.code, input: input)
+                try Task.checkCancellation()
+                guard let state, let editor, state.textView === editor,
+                      editor.text == source, editor.selectedRange == selection else {
+                    state?.operationError = "The document or selection changed. Run the transform again to apply it to the current text."
+                    return
                 }
-                return (s, sel)
-            }
-        }()
-
-        switch evaluate(code: slot.code, input: input) {
-        case .ok(let output):
-            textView.replace(replaceRange, withText: output)
-        case .failed(let message):
-            AppStateBus.shared.presentation.openErrorMessage =
-                "\(slot.displayName): \(message)"
+                let replacement = output.replacingLineEndings(with: state.lineEnding)
+                editor.replaceText(in: BatchReplaceSet(replacements: [.init(range: range, text: replacement)]))
+            } catch is CancellationError { }
+            catch { state?.operationError = "\(slot.displayName): \(error.localizedDescription)" }
         }
-    }
-
-    /// Outcome of evaluating a transform. We don't lift the failure
-    /// into Swift's `Error` protocol because the failure value is just
-    /// the JS engine's exception text — there's no Swift call site
-    /// that needs to propagate it as a typed error.
-    private enum Outcome {
-        case ok(String)
-        case failed(String)
-    }
-
-    /// Evaluate the user's JS with `input` and `text` predefined as
-    /// the source string. The script's last expression value is the
-    /// transform result; if the user assigned to `output`, that wins.
-    /// Exceptions from inside the script come back as `.failed`.
-    private static func evaluate(code: String, input: String) -> Outcome {
-        guard let ctx = JSContext() else {
-            return .failed("Couldn't create a JavaScript context.")
-        }
-        var errorMessage: String?
-        ctx.exceptionHandler = { _, exception in
-            errorMessage = exception?.toString() ?? "Unknown JavaScript error."
-        }
-        ctx.setObject(input, forKeyedSubscript: "input" as NSString)
-        ctx.setObject(input, forKeyedSubscript: "text"  as NSString)
-        ctx.setObject(NSNull(), forKeyedSubscript: "output" as NSString)
-
-        let lastExpression = ctx.evaluateScript(code)
-
-        if let errorMessage {
-            return .failed(errorMessage)
-        }
-        let outputGlobal = ctx.objectForKeyedSubscript("output")
-        if let outputGlobal, !outputGlobal.isNull, !outputGlobal.isUndefined {
-            return .ok(outputGlobal.toString() ?? "")
-        }
-        if let last = lastExpression, !last.isUndefined, !last.isNull {
-            return .ok(last.toString() ?? "")
-        }
-        return .ok("")
     }
 }
 

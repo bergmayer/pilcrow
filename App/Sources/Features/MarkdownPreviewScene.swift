@@ -2,141 +2,163 @@ import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
 
-/// WKWebView host for the rendered markdown. iPad opens it as a
-/// dedicated scene; iPhone presents it as a sheet (no second
-/// window). Share → Print → "Save as PDF" is the iPad-native PDF
-/// export.
+/// One preview owns one source document, even when another editor gains focus.
 struct MarkdownPreviewContent: View {
-
-    /// Scene host passes `dismissWindow`; sheet host passes
-    /// SwiftUI's `dismiss`. `nil` hides the Done button.
+    let document: PlainTextDocument
     var onDone: (() -> Void)?
+    @State private var html = ""
+    @State private var export: HTMLExport?
+    @State private var error: String?
+    @State private var reloadID = 0
 
-    @State private var renderedHTML: String = ""
-    /// Last rendered source — throttles re-renders while typing.
-    @State private var lastSource: String = ""
-    /// Scratch-sandbox `.html` for the share sheet, refreshed by
-    /// `rerender()` — `ShareLink(item:)` is body-evaluated, so the
-    /// file write must not happen inline there.
-    @State private var exportURL: URL?
+    private struct Source: Equatable, Sendable {
+        let text: String
+        let title: String
+    }
+
+    private var source: Source {
+        Source(text: document.text, title: document.fileURL?.deletingPathExtension().lastPathComponent ?? document.displayName)
+    }
 
     var body: some View {
         NavigationStack {
-            MarkdownWebView(html: renderedHTML)
-                .ignoresSafeArea(edges: .bottom)
-                .navigationTitle("Preview")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    if let onDone {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("Done", action: onDone).bold()
-                        }
+            VStack(spacing: 0) {
+                if let error {
+                    HStack {
+                        Text(error).font(.callout)
+                        Button("Reload") { self.error = nil; reloadID += 1 }
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        if let exportURL {
-                            ShareLink(item: exportURL,
-                                      preview: SharePreview(currentTitle))
-                        }
+                    .padding()
+                }
+                MarkdownWebView(html: html, onFailure: { error = $0 })
+                    .id(reloadID)
+            }
+            .ignoresSafeArea(edges: .bottom)
+            .navigationTitle(source.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if let onDone {
+                    ToolbarItem(placement: .topBarLeading) { Button("Done", action: onDone).bold() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if let export {
+                        ShareLink(item: export, preview: SharePreview(export.title))
                     }
                 }
-        }
-        .onAppear { rerender() }
-        // `EditorState` is a class — its `text` mutations don't
-        // drive SwiftUI, so a 600 ms timer is the cheapest hook for
-        // "live" preview without thrashing the WebView mid-typing.
-        .task(id: lastSource) {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(600))
-                rerender()
             }
         }
-    }
-
-    private func rerender() {
-        let src = AppStateBus.shared.scenes.currentSession?
-            .activeTab.document.text ?? ""
-        guard src != lastSource else { return }
-        lastSource = src
-        renderedHTML = MarkdownRenderer.html(for: src, title: currentTitle)
-        exportURL = writeExportFile(html: renderedHTML)
-    }
-
-    private var currentTitle: String {
-        AppStateBus.shared.scenes.currentSession?
-            .activeTab.document.fileURL?
-            .deletingPathExtension()
-            .lastPathComponent ?? "Untitled"
-    }
-
-    /// System Print → Save as PDF renders the shared `.html` to PDF.
-    private func writeExportFile(html: String) -> URL? {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(currentTitle).html")
-        do {
-            try html.write(to: url, atomically: true, encoding: .utf8)
-            return url
-        } catch {
-            return nil
+        .task(id: source) {
+            let captured = source
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                let rendered = MarkdownRenderer.html(for: captured.text, title: captured.title)
+                try Task.checkCancellation()
+                return HTMLExport(html: rendered, title: captured.title)
+            }
+            do {
+                let rendered = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                try Task.checkCancellation()
+                html = rendered.html
+                export = rendered
+                error = nil
+            } catch is CancellationError { }
+            catch { self.error = error.localizedDescription }
         }
     }
 }
 
-/// iPad host — opened via `openWindow(id: .markdownPreview)`.
-struct MarkdownPreviewScene: View {
+/// Sharing transfers immutable data; previews never collide in a temporary file.
+struct HTMLExport: Transferable, Sendable {
+    let html: String
+    let title: String
 
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .html) { Data($0.html.utf8) }
+            .suggestedFileName { $0.title + ".html" }
+    }
+}
+
+struct MarkdownPreviewScene: View {
+    let tabID: UUID?
     @Environment(\.dismissWindow) private var dismissWindow
+    @State private var document: PlainTextDocument?
 
     var body: some View {
-        MarkdownPreviewContent(onDone: {
-            dismissWindow(id: SceneID.markdownPreview.rawValue)
-        })
-        .onAppear {
-            // Same restore guard the file browser uses — drop the
-            // window if iPadOS restored it after a quit.
-            if !AppStateBus.shared.scenes.consumeOpen(.markdownPreview) {
-                dismissWindow(id: SceneID.markdownPreview.rawValue)
+        Group {
+            if let document {
+                MarkdownPreviewContent(document: document, onDone: { dismissWindow() })
+            } else {
+                ContentUnavailableView("Source document unavailable", systemImage: "doc",
+                    description: Text("Open a document and choose Markdown Preview again."))
             }
+        }
+        .onAppear {
+            guard document == nil, let tabID else { return }
+            document = AppStateBus.shared.scenes.session(containing: tabID)?
+                .tabs.first { $0.id == tabID }?.document
         }
     }
 }
 
-/// iPhone host — `openWindow` is a no-op on phone, so this is a
-/// `.sheet(item:)`.
 struct MarkdownPreviewSheet: View {
-
+    let document: PlainTextDocument
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        MarkdownPreviewContent(onDone: { dismiss() })
+        MarkdownPreviewContent(document: document, onDone: { dismiss() })
     }
 }
 
-// MARK: - WebView host
-
 private struct MarkdownWebView: UIViewRepresentable {
-
     let html: String
+    let onFailure: (String) -> Void
 
     func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        let view = WKWebView(frame: .zero, configuration: config)
+        let view = WKWebView(frame: .zero)
         view.isOpaque = false
         view.backgroundColor = .systemBackground
         view.scrollView.backgroundColor = .systemBackground
+        view.navigationDelegate = context.coordinator
         return view
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(onFailure: onFailure) }
 
-    /// Tracks the last-loaded HTML — `updateUIView` fires on every
-    /// host re-render, and an unconditional reload resets scroll.
-    final class Coordinator {
+    final class Coordinator: NSObject, WKNavigationDelegate {
         var lastHTML: String?
+        var position = CGPoint.zero
+        var zoomScale: CGFloat = 1
+        let onFailure: (String) -> Void
+
+        init(onFailure: @escaping (String) -> Void) { self.onFailure = onFailure }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.scrollView.setZoomScale(zoomScale, animated: false)
+            let maximum = max(0, webView.scrollView.contentSize.height - webView.scrollView.bounds.height)
+            webView.scrollView.setContentOffset(CGPoint(x: position.x, y: min(position.y, maximum)), animated: false)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+            guard (error as NSError).code != NSURLErrorCancelled else { return }
+            onFailure("Couldn't render preview: " + error.localizedDescription)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+            self.webView(webView, didFail: navigation, withError: error)
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            onFailure("The preview stopped rendering. Reload to continue.")
+        }
     }
 
     func updateUIView(_ view: WKWebView, context: Context) {
         guard html != context.coordinator.lastHTML else { return }
         context.coordinator.lastHTML = html
+        context.coordinator.position = view.scrollView.contentOffset
+        context.coordinator.zoomScale = view.scrollView.zoomScale
         view.loadHTMLString(html, baseURL: nil)
     }
 }
@@ -221,7 +243,7 @@ enum MarkdownRenderer {
 
 // MARK: - SwiftMarkdown
 
-/// Covers the casual subset: ATX headers, bold / italic / strike /
+/// Covers the casual subset: ATX and single-line Setext headers, bold / italic / strike /
 /// code, fenced + indented blocks, ordered/unordered lists,
 /// blockquotes, HRs, inline links/images, hard breaks, and GFM
 /// footnotes. NOT CommonMark — no tables, nested-list rules, HTML
@@ -229,7 +251,7 @@ enum MarkdownRenderer {
 enum SwiftMarkdown {
 
     static func render(_ source: String) -> String {
-        var parser = Parser(lines: source.components(separatedBy: "\n"))
+        var parser = Parser(lines: OutlineBuilder.lines(in: source))
         parser.parse()
         return parser.html
     }
@@ -265,8 +287,21 @@ enum SwiftMarkdown {
             // wire references to them and they don't leak inline.
             var bodyLines: [String] = []
             var i = 0
-            while i < lines.count {
+            var fence: OutlineBuilder.Fence?
+            while i < lines.count, !Task.isCancelled {
                 let line = lines[i]
+                if let open = fence {
+                    if open.closes(line) { fence = nil }
+                    bodyLines.append(line)
+                    i += 1
+                    continue
+                }
+                if let opening = OutlineBuilder.Fence(line) {
+                    fence = opening
+                    bodyLines.append(line)
+                    i += 1
+                    continue
+                }
                 if let defMatch = footnoteDefinitionMatch(line) {
                     var collected = defMatch.body
                     // Continuation lines: indented 4+ spaces or tab.
@@ -293,7 +328,7 @@ enum SwiftMarkdown {
         }
 
         private mutating func parseBlocks() {
-            while index < lines.count {
+            while index < lines.count, !Task.isCancelled {
                 let line = lines[index]
                 if line.trimmingCharacters(in: .whitespaces).isEmpty {
                     index += 1
@@ -304,13 +339,13 @@ enum SwiftMarkdown {
         }
 
         private mutating func consumeBlock(startingWith line: String) {
-            if line.hasPrefix("```") || line.hasPrefix("~~~") {
-                consumeFencedCodeBlock(fence: String(line.prefix(3)))
+            if let fence = OutlineBuilder.Fence(line) {
+                consumeFencedCodeBlock(fence: fence)
+            } else if let header = OutlineBuilder.heading(line, next: lines.indices.contains(index + 1) ? lines[index + 1] : nil) {
+                html += "<h\(header.level)>\(inline(header.text))</h\(header.level)>\n"
+                index += header.lines
             } else if isHorizontalRule(line) {
                 html += "<hr>\n"
-                index += 1
-            } else if let header = headerMatch(line) {
-                html += "<h\(header.level)>\(inline(header.text))</h\(header.level)>\n"
                 index += 1
             } else if line.hasPrefix("> ") || line == ">" {
                 consumeBlockquote()
@@ -327,10 +362,10 @@ enum SwiftMarkdown {
 
         // MARK: Block helpers
 
-        private mutating func consumeFencedCodeBlock(fence: String) {
+        private mutating func consumeFencedCodeBlock(fence: OutlineBuilder.Fence) {
             index += 1
             var code = ""
-            while index < lines.count, !lines[index].hasPrefix(fence) {
+            while index < lines.count, !Task.isCancelled, !fence.closes(lines[index]) {
                 code += htmlEscape(lines[index]) + "\n"
                 index += 1
             }
@@ -353,7 +388,7 @@ enum SwiftMarkdown {
 
         private mutating func consumeBlockquote() {
             var inner = ""
-            while index < lines.count {
+            while index < lines.count, !Task.isCancelled {
                 let line = lines[index]
                 if line.hasPrefix("> ") {
                     inner += inline(String(line.dropFirst(2))) + "<br>\n"
@@ -369,7 +404,7 @@ enum SwiftMarkdown {
         private mutating func consumeList(ordered: Bool) {
             let tag = ordered ? "ol" : "ul"
             html += "<\(tag)>\n"
-            while index < lines.count {
+            while index < lines.count, !Task.isCancelled {
                 let line = lines[index]
                 if ordered ? isOrderedListItem(line) : isUnorderedListItem(line) {
                     html += "<li>\(inline(stripListMarker(line)))</li>\n"
@@ -381,9 +416,10 @@ enum SwiftMarkdown {
 
         private mutating func consumeParagraph() {
             var paragraph: [String] = []
-            while index < lines.count {
+            while index < lines.count, !Task.isCancelled {
                 let line = lines[index]
-                if beginsBlock(line) { break }
+                let next = lines.indices.contains(index + 1) ? lines[index + 1] : nil
+                if beginsBlock(line) || OutlineBuilder.heading(line, next: next) != nil { break }
                 paragraph.append(line)
                 index += 1
             }
@@ -393,13 +429,12 @@ enum SwiftMarkdown {
         private func beginsBlock(_ line: String) -> Bool {
             line.trimmingCharacters(in: .whitespaces).isEmpty
                 || isHorizontalRule(line)
-                || headerMatch(line) != nil
+                || OutlineBuilder.heading(line) != nil
                 || line.hasPrefix("> ")
                 || line == ">"
                 || isUnorderedListItem(line)
                 || isOrderedListItem(line)
-                || line.hasPrefix("```")
-                || line.hasPrefix("~~~")
+                || OutlineBuilder.Fence(line) != nil
         }
 
         private mutating func appendFootnotes() {
@@ -419,17 +454,6 @@ enum SwiftMarkdown {
             let first = trimmed.first!
             guard first == "-" || first == "*" || first == "_" else { return false }
             return trimmed.allSatisfy { $0 == first || $0 == " " }
-        }
-
-        private func headerMatch(_ line: String) -> (level: Int, text: String)? {
-            var hashes = 0
-            for ch in line {
-                if ch == "#" { hashes += 1 } else { break }
-            }
-            guard (1...6).contains(hashes) else { return nil }
-            let afterHashes = line.dropFirst(hashes)
-            guard afterHashes.first == " " else { return nil }
-            return (hashes, String(afterHashes.dropFirst()))
         }
 
         private func isUnorderedListItem(_ line: String) -> Bool {

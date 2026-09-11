@@ -5,11 +5,9 @@ import LineEnding
 
 /// Document model for one open buffer.
 ///
-/// We don't use `DocumentGroup` / `FileDocument` because of an iOS 26.5
-/// simulator FileProvider bug: bookmarks to just-imported files return
-/// `FP -1005 "doesn't exist"`. Our own load path through `.fileImporter`
-/// + `URLSession` sidesteps it. Once Apple ships the fix this layer can
-/// probably go away.
+/// The editor owns its live buffers and local recovery separately from
+/// source files. File-provider access is coordinated; opening and saving
+/// publish model changes only after their filesystem operation succeeds.
 @MainActor
 @Observable
 final class PlainTextDocument {
@@ -22,7 +20,7 @@ final class PlainTextDocument {
     var text: String = ""
 
     /// Bumped on every edit. Observers that just need "something
-    /// changed" (autosave debounce, change-history overlay) watch
+    /// changed" (recovery checkpoints, change-history overlay) watch
     /// this instead of `text` to avoid invalidating the full buffer.
     var bufferRevision: UInt64 = 0
 
@@ -38,16 +36,23 @@ final class PlainTextDocument {
     /// from `revisionKey` so two windows editing the same URL cannot clobber
     /// each other's unsaved snapshots.
     private let scratchID = UUID()
+    var scratchFilename: String { "\(scratchID.uuidString).txt" }
     private let scratchWriter = ScratchWriter()
     private var scratchGeneration: UInt64 = 0
     private var recoveryGeneration: UInt64 = 0
     private var revisionTask: Task<Void, Never>?
 
+    /// Stays visible in this document until recovery succeeds or the
+    /// buffer is saved/discarded. Repeated failures never stack alerts.
+    private(set) var recoveryError: String?
+
+    var externalChangeMessage: String?
     var isDirty: Bool = false
     /// Raw bytes from the last load — kept so the encoding picker can
     /// re-decode with a different encoding without re-reading disk.
     var originalData: Data?
     var isLoading: Bool = false
+    var isSaving: Bool = false
     private var loadGeneration: UInt64 = 0
 
     /// Device-local recovery snapshot URL. Set on the first committed
@@ -59,7 +64,7 @@ final class PlainTextDocument {
     /// scratch shadow; afterward that shadow points at `draftURL`. Excluding
     /// both prevents another window from offering work that is still open.
     var liveRecoveryFilenames: Set<String> {
-        var filenames = Set(["\(scratchID.uuidString).txt"])
+        var filenames = Set([scratchFilename])
         if let draftURL {
             filenames.insert(draftURL.lastPathComponent)
         }
@@ -102,29 +107,6 @@ final class PlainTextDocument {
     var sourceMtimeAtLoad: Date?
     var sourceSizeAtLoad: Int?
 
-    /// Reads the file's modification date + size for the stale
-    /// check. `nil` means the URL is gone or unreachable.
-    nonisolated static func diskAttrs(of url: URL) -> (mtime: Date, size: Int)? {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard let attrs = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-              let mtime = attrs.contentModificationDate,
-              let size = attrs.fileSize
-        else { return nil }
-        return (mtime, size)
-    }
-
-    /// Synchronous load. Used by Revert-to-Saved; new code should
-    /// prefer ``loadAsync(from:)`` so a slow File Provider can be
-    /// cancelled mid-read.
-    func load(from url: URL) throws {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let data = try Data(contentsOf: url)
-        let payload = try Self.decodePayload(from: data)
-        applyPayload(payload, url: url)
-    }
-
     // Internal (not private) so encoding-detection unit tests can
     // exercise it without touching disk or the revision store.
     nonisolated static func decodePayload(from data: Data) throws -> LoadPayload {
@@ -161,10 +143,8 @@ final class PlainTextDocument {
         }
     }
 
-    /// Async load with mid-flight cancellation. URLSession is the
-    /// only Foundation API where `Task.cancel()` genuinely aborts an
-    /// in-flight file read; synchronous `Data(contentsOf:)` only
-    /// checks between chunks.
+    /// Read and decode away from the main actor; only the current load
+    /// may publish its completed payload into the document.
     func loadAsync(from url: URL) async throws {
         loadGeneration &+= 1
         let generation = loadGeneration
@@ -178,29 +158,30 @@ final class PlainTextDocument {
         // Yield so SwiftUI can paint the loading overlay before the
         // text-assignment pass kicks the engine.
         await Task.yield()
-        try? await Task.sleep(for: Timing.loadOverlayHandoff)
-        if Task.isCancelled { throw CancellationError() }
+        try await Task.sleep(for: Timing.loadOverlayHandoff)
+        try Task.checkCancellation()
+        guard loadGeneration == generation else { throw CancellationError() }
         applyPayload(payload, url: url)
     }
 
     func applyPayload(_ payload: LoadPayload, url: URL) {
+        externalChangeMessage = nil
         self.text = payload.text
         self.fileEncoding = payload.encoding
         self.originalData = payload.data
         self.lineEnding = Self.detectLineEnding(in: payload.text) ?? .lf
-        self.fileURL = url
+        let sourceURL = payload.sourceURL ?? url
+        self.fileURL = sourceURL
         self.isDirty = false
         // Capture the disk snapshot now so the stale-source check
         // on save can spot concurrent writes from other apps /
         // devices.
-        if let attrs = Self.diskAttrs(of: url) {
-            self.sourceMtimeAtLoad = attrs.mtime
-            self.sourceSizeAtLoad = attrs.size
-        }
+        self.sourceMtimeAtLoad = payload.modificationDate
+        self.sourceSizeAtLoad = payload.data.count
         // URL-derived key — reopening the same file finds its
         // revision history. Anything captured under the prior
         // untitled-UUID key is orphaned (acceptable tradeoff).
-        self.revisionKey = RevisionStore.key(for: url)
+        self.revisionKey = RevisionStore.key(for: sourceURL)
         // Seed an "original on open" revision once per URL so a
         // later Revert-to-Original has an anchor. Best-effort — a
         // sandbox write failure doesn't fail the document load.
@@ -229,94 +210,59 @@ final class PlainTextDocument {
         let data: Data
         let text: String
         let encoding: FileEncoding
+        var sourceURL: URL?
+        var modificationDate: Date?
     }
 
     nonisolated static func readPayload(from url: URL) async throws -> LoadPayload {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        try await materializeUbiquitousItemIfNeeded(at: url)
-
-        // URLSession's async data(from:) is the only Foundation API
-        // where Task.cancel() genuinely aborts an in-flight file read
-        // — synchronous FileHandle / Data(contentsOf:) only honour
-        // cancellation between chunks.
-        //
-        // Hard 2-minute resource timeout so a hung provider doesn't
-        // leave the load Task running forever.
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 120
-        config.waitsForConnectivity = false
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
-
-        let (data, _): (Data, URLResponse) = try await session.data(from: url)
-        return try decodePayload(from: data)
-    }
-
-    /// Pull an iCloud-Drive file down if it's not local yet. Polls
-    /// at 200 ms via Task.sleep so the main runloop keeps pumping.
-    /// 90-second timeout matches URLSession's resource budget.
-    nonisolated private static func materializeUbiquitousItemIfNeeded(at url: URL) async throws {
-        let manager = FileManager.default
-        guard manager.isUbiquitousItem(at: url) else { return }
-        try manager.startDownloadingUbiquitousItem(at: url)
-        let deadline = Date().addingTimeInterval(90)
-        while Date() < deadline {
-            try Task.checkCancellation()
-            let values = try url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
-            if values.ubiquitousItemDownloadingStatus == .current { return }
-            try await Task.sleep(for: Timing.ubiquitousItemPoll)
+        try await CoordinatedFileAccess.perform(at: url) { coordinatedURL in
+            let attributes = try coordinatedURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            if let size = attributes.fileSize, size > hardSizeCap {
+                throw DocumentError.fileTooLarge(bytes: size)
+            }
+            var payload = try decodePayload(from: Data(contentsOf: coordinatedURL))
+            payload.sourceURL = coordinatedURL
+            payload.modificationDate = attributes.contentModificationDate
+            return payload
         }
     }
 
-    /// ⌘S — write to the existing `fileURL`. Use `save(to:)` for first save.
-    func save() throws {
-        guard let fileURL else { throw DocumentError.noFileURL }
-        try save(to: fileURL)
+    struct SavedSnapshot: Sendable {
+        let url: URL
+        let inputText: String
+        let text: String
+        let data: Data
+        let encoding: FileEncoding
+        let lineEnding: LineEnding
+        let modificationDate: Date?
     }
 
-    /// Write to `url` and update document state to reflect it.
-    /// Used by ⌘S, Save As, and the post-rename rewrite path.
-    func save(to url: URL, revisionKind: RevisionStore.Kind = .manual) throws {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
-        let savedText = preparedTextForSaving(text)
-        let data = try encodedData()
-        try data.write(to: url, options: .atomic)
-        let isFirstSave = (self.fileURL == nil)
-        self.fileURL = url
-        self.originalData = data
-        self.text = savedText
-        self.isDirty = false
-        // Bring the stale-source baseline up to date with the bytes
-        // we just wrote — otherwise the next ⌘S would see "changed
-        // since last load" and warn about our own write.
-        if let attrs = Self.diskAttrs(of: url) {
-            self.sourceMtimeAtLoad = attrs.mtime
-            self.sourceSizeAtLoad = attrs.size
+    /// Write a captured buffer without adopting it. The owning workflow
+    /// reconciles completion with any edits made while access was pending.
+    func writeSnapshot(to url: URL, text input: String, overwrite: Bool = false) async throws -> SavedSnapshot {
+        let settings = saveSettings
+        let isCurrentSource = fileURL?.standardizedFileURL == url.standardizedFileURL
+        let expected = originalData
+        return try await CoordinatedFileAccess.perform(at: url, writing: true) { destination in
+            if !overwrite {
+                if isCurrentSource {
+                    guard let expected, try Data(contentsOf: destination) == expected else {
+                        throw DocumentError.sourceChanged
+                    }
+                } else if FileManager.default.fileExists(atPath: destination.path) {
+                    throw CocoaError(.fileWriteFileExists)
+                }
+            }
+            let (savedText, data) = try settings.prepare(input)
+            try data.write(to: destination, options: .atomic)
+            let date = try? destination.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            return SavedSnapshot(url: destination, inputText: input, text: savedText, data: data,
+                encoding: settings.encoding, lineEnding: settings.lineEnding, modificationDate: date)
         }
-        // The just-written file is now canonical; drop the scratch
-        // shadow and the draft entry so neither resurrects stale bytes.
-        deleteScratchFile()
-        if let stale = draftURL {
-            DraftsStore.shared.discard(stale)
-            draftURL = nil
-        }
-        if isFirstSave {
-            self.revisionKey = RevisionStore.key(for: url)
-        }
-        scheduleRevisionRecording(
-            original: isFirstSave ? savedText : nil,
-            revision: (savedText, revisionKind),
-            key: revisionKey
-        )
     }
 
-    /// Finalize a successful SwiftUI `.fileExporter` write. The exporter
-    /// owns the actual filesystem write; this method performs the same
-    /// model bookkeeping as `save(to:)` without writing the bytes twice.
+    /// Commit model state after either an atomic save or a successful
+    /// SwiftUI export. No document bookkeeping happens before the write.
     /// `currentText` may differ from `savedText` if an external keyboard
     /// edit landed while the picker was dismissing. In that rare case the
     /// exported snapshot becomes the disk baseline and the newer buffer
@@ -325,27 +271,19 @@ final class PlainTextDocument {
         to url: URL,
         savedText: String,
         savedData: Data,
-        currentText: String
+        currentText: String,
+        modificationDate: Date?
     ) {
-        let previousDraftURL = draftURL
-
-        recoveryGeneration &+= 1
-        deleteScratchOnly()
-        DraftsStore.shared.discard(previousDraftURL)
-        draftURL = nil
+        deleteScratchFile()
 
         fileURL = url
+        externalChangeMessage = nil
         originalData = savedData
         revisionKey = RevisionStore.key(for: url)
         text = currentText
         isDirty = currentText != savedText
-        if let attrs = Self.diskAttrs(of: url) {
-            sourceMtimeAtLoad = attrs.mtime
-            sourceSizeAtLoad = attrs.size
-        } else {
-            sourceMtimeAtLoad = nil
-            sourceSizeAtLoad = nil
-        }
+        sourceMtimeAtLoad = modificationDate
+        sourceSizeAtLoad = savedData.count
 
         scheduleRevisionRecording(
             original: savedText,
@@ -372,7 +310,8 @@ final class PlainTextDocument {
     /// Never touches `fileURL` either way — ⌘S is the only path
     /// that writes back to the source. Off-main so the encode +
     /// write don't freeze the typing loop.
-    func autoSave() {
+    @discardableResult
+    func autoSave() -> Task<Void, Never> {
         let snapshot = text
         let key = revisionKey
         scratchGeneration &+= 1
@@ -384,29 +323,30 @@ final class PlainTextDocument {
             draftFilename: draftURL?.lastPathComponent,
             metadata: makeDraftMetadata()
         )
-        Task(priority: .utility) {
+        let task = Task(priority: .utility) { [weak self, scratchWriter] in
             // Scratch is exact UTF-8 buffer state. Save-time whitespace,
             // newline, BOM, and encoding preferences must never alter a
             // crash-recovery copy.
-            await scratchWriter.write(
-                text: snapshot,
-                sidecar: sidecar,
-                generation: generation
-            )
+            let failure: String?
+            do {
+                try await scratchWriter.write(
+                    text: snapshot,
+                    sidecar: sidecar,
+                    generation: generation
+                )
+                failure = nil
+            } catch {
+                failure = error.localizedDescription
+            }
+            guard let self, self.scratchGeneration == generation else { return }
+            self.recoveryError = failure
         }
         scheduleRevisionRecording(revision: (snapshot, .auto), key: key)
+        return task
     }
 
-    /// Alias kept for legacy call sites — the unified `autoSave()`
-    /// already handles untitled buffers.
-    func autoSnapshot() { autoSave() }
-
-    /// Push the live buffer into the device-local recovery store. Called
-    /// from every close path (tab × / ⌘W / Save as Draft / window
-    /// close / app background) so that an interrupted session can
-    /// be resumed from the launcher on this device. Debounced autosave
-    /// doesn't call this — the committed recovery folder
-    /// only gets a fresh copy at moments the user "lets go" of it.
+    /// Commit the live buffer before a lifecycle transition. This is private
+    /// restoration data; source files are changed only by an explicit Save.
     @discardableResult
     func writeRecoverySnapshot() async throws -> Bool {
         recoveryGeneration &+= 1
@@ -438,8 +378,8 @@ final class PlainTextDocument {
         return true
     }
 
-    /// Commits launcher-visible recovery before lifecycle or explicit-close
-    /// bookkeeping, then refreshes the crash shadow with the resulting draft
+    /// Commits recovery before lifecycle bookkeeping, then refreshes the
+    /// crash shadow with the resulting draft
     /// filename. Callers can await this without blocking the main actor.
     func commitRecoverySnapshot() async throws {
         guard try await writeRecoverySnapshot(), isDirty else { return }
@@ -451,7 +391,10 @@ final class PlainTextDocument {
     func deleteScratchFile() {
         recoveryGeneration &+= 1
         deleteScratchOnly()
-        DraftsStore.shared.discard(draftURL)
+        if let draftURL {
+            DraftsStore.shared.discard(draftURL)
+            DraftsStore.shared.discardAllCopies(named: draftURL.lastPathComponent)
+        }
         draftURL = nil
     }
 
@@ -482,6 +425,7 @@ final class PlainTextDocument {
     }
 
     private func deleteScratchOnly() {
+        recoveryError = nil
         scratchGeneration &+= 1
         let generation = scratchGeneration
         scratchWriter.noteLatestDiscard(generation)
@@ -523,29 +467,28 @@ final class PlainTextDocument {
         }
     }
 
-    func encodedData() throws -> Data {
-        let defaults = UserDefaults.standard
-        return try Self.encode(
-            text: text,
-            encoding: fileEncoding,
-            lineEnding: lineEnding,
-            trimTrailingWhitespace: defaults.bool(forKey: AppPreferenceKey.trimTrailingWhitespaceOnSave),
-            ensureTrailingNewline: defaults.bool(forKey: AppPreferenceKey.ensureTrailingNewline),
-            saveUTF8BOMPref: defaults.bool(forKey: AppPreferenceKey.saveUTF8BOM)
-        )
+    struct SaveSettings: Sendable {
+        let encoding: FileEncoding
+        let lineEnding: LineEnding
+        let trimTrailingWhitespace: Bool
+        let ensureTrailingNewline: Bool
+        let saveUTF8BOM: Bool
+
+        nonisolated func prepare(_ source: String) throws -> (text: String, data: Data) {
+            let text = PlainTextDocument.prepareTextForSaving(source, lineEnding: lineEnding,
+                trimTrailingWhitespace: trimTrailingWhitespace, ensureTrailingNewline: ensureTrailingNewline)
+            let data = try PlainTextDocument.encode(text: text, encoding: encoding, lineEnding: lineEnding,
+                trimTrailingWhitespace: false, ensureTrailingNewline: false, saveUTF8BOMPref: saveUTF8BOM)
+            return (text, data)
+        }
     }
 
-    /// The exact string that Save will make canonical on disk and in the
-    /// editor buffer. Keeping this transformation public to the app layer
-    /// lets mounted editors apply it through their undo-aware replace path.
-    func preparedTextForSaving(_ source: String) -> String {
+    var saveSettings: SaveSettings {
         let defaults = UserDefaults.standard
-        return Self.prepareTextForSaving(
-            source,
-            lineEnding: lineEnding,
+        return SaveSettings(encoding: fileEncoding, lineEnding: lineEnding,
             trimTrailingWhitespace: defaults.bool(forKey: AppPreferenceKey.trimTrailingWhitespaceOnSave),
-            ensureTrailingNewline: defaults.bool(forKey: AppPreferenceKey.ensureTrailingNewline)
-        )
+            ensureTrailingNewline: defaults.bool(forKey: AppPreferenceKey.ensureTrailingNewline),
+            saveUTF8BOM: defaults.bool(forKey: AppPreferenceKey.saveUTF8BOM))
     }
 
     nonisolated static func prepareTextForSaving(
@@ -606,6 +549,8 @@ final class PlainTextDocument {
     enum DocumentError: LocalizedError {
         case noFileURL
         case noOriginalData
+        case sourceChanged
+        case saveInProgress
         case fileTooLarge(bytes: Int)
         case binaryFile
         case undecodable
@@ -613,6 +558,10 @@ final class PlainTextDocument {
             switch self {
             case .noFileURL:
                 return "Save the document first before using Save."
+            case .sourceChanged:
+                return "The source file changed after it was opened. Reload it or choose Save Anyway."
+            case .saveInProgress:
+                return "This document is already being saved."
             case .noOriginalData:
                 return "There are no original file bytes to reinterpret."
             case .fileTooLarge(let bytes):
@@ -651,45 +600,13 @@ final class PlainTextDocument {
         }
         return types
     }()
-    nonisolated static let supportedWriteTypes: [UTType] = {
-        var types: [UTType] = [
-            .plainText, .utf8PlainText, .sourceCode, .text,
-            .delimitedText, .commaSeparatedText, .tabSeparatedText,
-            .yaml, .json, .xml, .html
-        ]
-        for identifier in ["net.daringfireball.markdown", "org.tug.tex", "app.typst.typst"] {
-            if let custom = UTType(identifier), !types.contains(custom) { types.append(custom) }
-        }
-        return types
-    }()
-
-    nonisolated static func supportedWriteType(for url: URL?) -> UTType {
-        guard let ext = url?.pathExtension, !ext.isEmpty else { return .plainText }
-        if let type = UTType(filenameExtension: ext),
-           supportedWriteTypes.contains(where: { $0 == type || type.conforms(to: $0) }) {
-            return type
-        }
-        let customByExtension: [String: String] = [
-            "md": "net.daringfireball.markdown",
-            "markdown": "net.daringfireball.markdown",
-            "tex": "org.tug.tex",
-            "typ": "app.typst.typst",
-            "typst": "app.typst.typst"
-        ]
-        if let identifier = customByExtension[ext.lowercased()],
-           let custom = UTType(identifier) {
-            return custom
-        }
-        return .plainText
-    }
-
     nonisolated static let candidateEncodings: [String.Encoding] = [
         .utf8, .utf16, .utf16LittleEndian, .utf16BigEndian, .utf32,
         .windowsCP1252, .isoLatin1, .isoLatin2, .macOSRoman,
         .shiftJIS, .japaneseEUC, .iso2022JP
     ]
 
-    static func detectLineEnding(in string: String) -> LineEnding? {
+    nonisolated static func detectLineEnding(in string: String) -> LineEnding? {
         switch TextMetrics.firstLineEnding(in: string as NSString) {
         case .lf?:   return .lf
         case .cr?:   return .cr

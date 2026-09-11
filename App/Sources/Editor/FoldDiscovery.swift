@@ -49,44 +49,9 @@ enum FoldDiscovery {
 
     // MARK: - Markdown (O(N))
 
-    private struct HeaderInfo {
-        let row: Int
-        let level: Int
-    }
-
     private static func markdownFoldableHeaders(in text: NSString) -> [EditorEngine.TextView.FoldableRegion] {
-        let length = text.length
-        guard length > 0 else { return [] }
-
-        // Single pass: walk every UTF-16 unit, identify line starts,
-        // and at each line start check the first few characters for an
-        // ATX heading marker. Record (row, level) for matches.
-        var headers: [HeaderInfo] = []
-        var row = 0
-        var atLineStart = true
-        var i = 0
-        while i < length {
-            if atLineStart {
-                if let level = atxLevelStartingAt(i, in: text, length: length) {
-                    headers.append(HeaderInfo(row: row, level: level))
-                }
-                atLineStart = false
-            }
-            let c = text.character(at: i)
-            if c == 0x0A {           // LF
-                row += 1
-                atLineStart = true
-                i += 1
-            } else if c == 0x0D {    // CR or CRLF
-                row += 1
-                atLineStart = true
-                i += 1
-                if i < length, text.character(at: i) == 0x0A { i += 1 }
-            } else {
-                i += 1
-            }
-        }
-        let totalRows = row + 1
+        let headers = OutlineBuilder.build(in: text)
+        let totalRows = lineCount(in: text)
 
         // Pair each header with its body end: the row before the next
         // header whose level is ≤ this header's, or the last row.
@@ -101,23 +66,6 @@ enum FoldDiscovery {
             out.append(.init(headerRow: header.row, bodyRange: (header.row + 1)...endRow))
         }
         return out
-    }
-
-    /// `nil` if `pos` is not the start of an ATX heading; otherwise the
-    /// heading level (1–6). ATX heading per CommonMark: 1–6 `#`s
-    /// followed by a space, tab, or end-of-line.
-    private static func atxLevelStartingAt(_ pos: Int, in text: NSString, length: Int) -> Int? {
-        var i = pos
-        var hashes = 0
-        while i < length, text.character(at: i) == 0x23, hashes <= 6 {
-            hashes += 1
-            i += 1
-        }
-        guard (1...6).contains(hashes) else { return nil }
-        guard i < length else { return hashes }
-        let next = text.character(at: i)
-        guard next == 0x20 || next == 0x09 || next == 0x0A || next == 0x0D else { return nil }
-        return hashes
     }
 
     // MARK: - Indent (O(N))
@@ -188,38 +136,7 @@ enum FoldDiscovery {
         forHeaderRow header: Int,
         in text: NSString
     ) -> ClosedRange<Int>? {
-        let total = lineCount(in: text)
-        guard header < total - 1 else { return nil }
-        guard let headerLevel = atxHeadingLevel(row: header, in: text) else { return nil }
-        var lastBody = header
-        var row = header + 1
-        while row < total {
-            if let level = atxHeadingLevel(row: row, in: text), level <= headerLevel {
-                break
-            }
-            lastBody = row
-            row += 1
-        }
-        guard lastBody > header else { return nil }
-        return (header + 1)...lastBody
-    }
-
-    private static func atxHeadingLevel(row: Int, in text: NSString) -> Int? {
-        guard let start = lineStart(row: row, in: text) else { return nil }
-        let length = text.length
-        var i = start
-        var hashes = 0
-        while i < length, text.character(at: i) == 0x23 { // '#'
-            hashes += 1
-            i += 1
-        }
-        guard (1...6).contains(hashes) else { return nil }
-        // Must be followed by whitespace or end-of-line to count as an ATX
-        // heading per CommonMark.
-        guard i < length else { return hashes }
-        let next = text.character(at: i)
-        guard next == 0x20 || next == 0x09 || next == 0x0A || next == 0x0D else { return nil }
-        return hashes
+        markdownFoldableHeaders(in: text).first { $0.headerRow == header }?.bodyRange
     }
 
     // MARK: - Indent-based

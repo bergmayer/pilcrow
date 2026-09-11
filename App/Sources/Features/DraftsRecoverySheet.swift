@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// A second entry point to the same normalized recovery catalog used by the
-/// new-tab launcher. A recovery payload is presented exactly once: grouped
+/// Exceptional recovery, offered by the launcher only when work remains.
+/// Uses the same normalized catalog to exclude documents already open. A recovery payload is presented exactly once: grouped
 /// under a multi-tab window or as one document row.
 struct DraftsRecoverySheet: View {
+
+    let owner: EditorSession
 
     @Environment(\.dismiss) private var dismiss
     @State private var drafts: [DraftRecord] = []
@@ -37,13 +39,13 @@ struct DraftsRecoverySheet: View {
                         "Nothing to recover",
                         systemImage: "tray.full",
                         description: Text(
-                            "Windows and documents closed with unsaved changes will appear here."
+                            "All available work has been restored."
                         )
                     )
                 } else {
                     List {
                         if !catalog.windows.isEmpty {
-                            Section("Closed Windows") {
+                            Section("Windows") {
                                 ForEach(catalog.windows) { record in
                                     closedWindowRow(record)
                                 }
@@ -59,11 +61,11 @@ struct DraftsRecoverySheet: View {
                     }
                 }
             }
-            .navigationTitle("Recoverable Work")
+            .navigationTitle("Recover Unsaved Changes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Keep") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
                 if !catalog.isEmpty {
                     ToolbarItem(placement: .confirmationAction) {
@@ -116,7 +118,7 @@ struct DraftsRecoverySheet: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Continue Closed Window")
+                    Text("Restore Window")
                         .font(.body.weight(.medium))
                     HStack(spacing: 4) {
                         Text(windowSummary(record))
@@ -143,7 +145,7 @@ struct DraftsRecoverySheet: View {
             }
 
             ForEach(Array(record.tabs.enumerated()), id: \.offset) { index, snapshot in
-                let draft = snapshot.draftFilename.flatMap {
+                let draft = snapshot.recoveryFilename.flatMap {
                     catalog.draftsByFilename[$0]
                 }
                 HStack(alignment: .top, spacing: 8) {
@@ -246,7 +248,7 @@ struct DraftsRecoverySheet: View {
         dismiss()
         Task { @MainActor in
             try? await Task.sleep(for: Timing.paletteHandoff)
-            CommandActions.recoverClosedWindow(record)
+            CommandActions.recoverClosedWindow(record, in: owner)
         }
     }
 
@@ -255,9 +257,9 @@ struct DraftsRecoverySheet: View {
         Task { @MainActor in
             try? await Task.sleep(for: Timing.paletteHandoff)
             if let record = item.closedWindow {
-                CommandActions.recoverClosedWindow(record)
+                CommandActions.recoverClosedWindow(record, in: owner)
             } else {
-                CommandActions.recoverDraft(item.draft)
+                CommandActions.recoverDraft(item.draft, in: owner)
             }
         }
     }
@@ -268,13 +270,13 @@ struct DraftsRecoverySheet: View {
         Task { @MainActor in
             try? await Task.sleep(for: Timing.paletteHandoff)
             for record in snapshot.windows {
-                CommandActions.recoverClosedWindow(record)
+                CommandActions.recoverClosedWindow(record, in: owner)
             }
             for item in snapshot.drafts {
                 if let record = item.closedWindow {
-                    CommandActions.recoverClosedWindow(record)
+                    CommandActions.recoverClosedWindow(record, in: owner)
                 } else {
-                    CommandActions.recoverDraft(item.draft)
+                    CommandActions.recoverDraft(item.draft, in: owner)
                 }
             }
         }
@@ -368,7 +370,7 @@ struct DraftsRecoverySheet: View {
         guard let draft else { return "Saved" }
         let status = draft.metadata?.sourceDisplay != nil || snapshot.fileBookmark != nil
             ? "Edited"
-            : "Unsaved draft"
+            : "Unsaved document"
         return "\(status) · \(draft.preview.isEmpty ? "(empty buffer)" : draft.preview)"
     }
 
@@ -385,7 +387,7 @@ struct DraftsRecoverySheet: View {
 
     private func draftMetadata(_ draft: DraftRecord) -> String {
         let status = draft.metadata?.sourceDisplay == nil
-            ? "Unsaved draft"
+            ? "Unsaved document"
             : "Unsaved changes"
         let size = draft.bytes.formatted(.byteCount(style: .file))
         let when = draft.modified.formatted(date: .abbreviated, time: .shortened)

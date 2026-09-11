@@ -12,9 +12,9 @@ final class AppStateBus: CommandContext {
 
     var find    = FindState()
     var scenes  = SceneRouter()
-    var pickers = PickerIntents()
+    @ObservationIgnored private let unownedPickers = PickerIntents()
+    var pickers: PickerIntents { scenes.currentSession?.pickers ?? unownedPickers }
     var presentation = PresentationState()
-    var pending = PendingURLs()
 
     private init() {}
 }
@@ -27,7 +27,6 @@ protocol CommandContext: AnyObject {
     var scenes: SceneRouter  { get }
     var pickers: PickerIntents { get }
     var presentation: PresentationState  { get }
-    var pending: PendingURLs   { get }
 }
 
 @MainActor

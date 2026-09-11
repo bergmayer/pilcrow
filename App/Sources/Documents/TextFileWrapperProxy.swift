@@ -1,31 +1,25 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// `FileDocument` conformance required by SwiftUI's `.fileExporter`.
-/// Holds a snapshot *provider* rather than eager bytes: SwiftUI
-/// re-evaluates `.fileExporter(document:)` on every body render, so
-/// the O(n) buffer copy + encode must wait until `fileWrapper` runs
-/// at actual export time.
+/// Immutable, prepared bytes for one native Save As presentation.
 struct TextFileWrapperProxy: FileDocument {
-    let snapshot: @Sendable () throws -> Data
+    let data: Data
 
     static let readableContentTypes: [UTType] = []
-    static let writableContentTypes: [UTType] = PlainTextDocument.supportedWriteTypes
+    // Bytes are already encoded. A concrete text UTI makes the native
+    // exporter append its preferred extension (e.g. .md.txt).
+    static let writableContentTypes: [UTType] = [.data]
 
-    init() {
-        self.snapshot = { Data() }
-    }
-
-    init(snapshot: @escaping @Sendable () throws -> Data) {
-        self.snapshot = snapshot
-    }
+    init(data: Data) { self.data = data }
 
     init(configuration: ReadConfiguration) throws {
-        let data = configuration.file.regularFileContents ?? Data()
-        self.snapshot = { data }
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
     }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: try snapshot())
+        FileWrapper(regularFileWithContents: data)
     }
 }

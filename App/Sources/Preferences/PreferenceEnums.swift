@@ -1,6 +1,39 @@
 import Foundation
 import UIKit
 
+enum NewDocumentContent: String, CaseIterable, Identifiable {
+    case startPage
+    case blankDocument
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .startPage: "Start Page"
+        case .blankDocument: "Blank Document"
+        }
+    }
+
+    var tabKind: TabKind {
+        switch self {
+        case .startPage: .launcher
+        case .blankDocument: .editor
+        }
+    }
+}
+
+enum DocumentTabAppearance: String, CaseIterable, Identifiable {
+    case tabBar
+    case sidebar
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .tabBar: "Tab Bar"
+        case .sidebar: "Sidebar"
+        }
+    }
+}
+
 enum AppIconChoice: String, CaseIterable, Identifiable {
     case forest
     case burgundy

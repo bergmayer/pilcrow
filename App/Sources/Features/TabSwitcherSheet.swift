@@ -1,24 +1,14 @@
 import SwiftUI
 
-/// Safari-style tab switcher (the "expose" view) presented inline by
-/// `EditorScene` — not as a sheet. The active tab's card shares a
-/// `matchedGeometryEffect` namespace with the editor stack, so toggling
-/// the switcher visibly shrinks the editor into its grid card and grows
-/// it back out on dismiss.
-///
-/// Footer mirrors Safari: tab count on the left, `+` button (long-press
-/// for recently-closed) in the middle, Done (✓) on the right.
+/// Per-window tab overview. Cards select, close, and reorder existing
+/// buffers; the footer creates tabs or reopens recently closed work.
 struct TabSwitcherView: View {
 
     @Bindable var session: EditorSession
-    let namespace: Namespace.ID
-    /// The match id paired with `EditorScene.editorStack` so the
-    /// active card and the editor frame are the same animated geometry.
-    let matchID: String
     let onDismiss: () -> Void
 
     /// Adaptive grid: ~160pt cards. iPhone portrait yields 2 columns,
-    /// iPad lands 3–5 depending on width. Matches Safari's density.
+    /// iPad lands 3–5 depending on width.
     private let columns: [GridItem] = [
         GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12)
     ]
@@ -69,9 +59,9 @@ struct TabSwitcherView: View {
                 AppStateBus.shared.scenes.claimFocus(session: session)
                 onDismiss()
             } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 36, height: 36)
+                Text("Done")
+                    .font(.headline)
+                    .frame(minWidth: 44, minHeight: 44)
             }
             .accessibilityLabel("Done")
         }
@@ -90,51 +80,34 @@ struct TabSwitcherView: View {
 
     @ViewBuilder
     private func card(for tab: TabModel) -> some View {
-        baseCard(for: tab)
-            .matchedGeometryEffect(
-                id: matchedID(for: tab),
-                in: namespace,
-                properties: .frame,
-                isSource: tab.id == session.selectedTabID
-            )
-    }
-
-    @ViewBuilder
-    private func baseCard(for tab: TabModel) -> some View {
         TabCard(
             tab: tab,
             isActive: tab.id == session.selectedTabID,
-            // A single-tab session is closeable when that tab has
-            // real content (`.editor` / `.fileBrowser`) — closing
-            // spawns a fresh launcher in its place. The exception
-            // is a lone launcher tab: closing it would just spawn
-            // another launcher, so we hide the X to avoid the
-            // pointless gesture.
-            canClose: session.tabs.count > 1 || tab.kind != .launcher,
             onSelect: { activate(tab) },
-            onClose:  { CommandActions.requestCloseTab(tab.id, in: session) },
+            onClose:  { close(tab) },
             onPin:    { session.togglePinned(tab.id) },
-            onCloseOthers: { CommandActions.requestCloseOtherTabs(except: tab.id, in: session) },
-            onCloseRight:  { CommandActions.requestCloseTabsToRight(of: tab.id, in: session) }
+            onCloseOthers: {
+                onDismiss()
+                CommandActions.requestCloseOtherTabs(except: tab.id, in: session)
+            },
+            onCloseRight: {
+                onDismiss()
+                CommandActions.requestCloseTabsToRight(of: tab.id, in: session)
+            }
         )
-    }
-
-    /// Active tab gets the shared match id (paired with the editor
-    /// stack). Other tabs get unique ids so they animate in/out
-    /// independently — they don't morph from the editor.
-    private func matchedID(for tab: TabModel) -> String {
-        tab.id == session.selectedTabID ? matchID : "tab-card-\(tab.id)"
+        .draggable(tab.id.uuidString)
+        .dropDestination(for: String.self) { items, _ in
+            return session.acceptTabDrop(items, onto: tab.id)
+        }
     }
 
     @ViewBuilder
     private var plusMenu: some View {
         Menu {
             Button {
+                AppStateBus.shared.scenes.claimFocus(session: session)
                 onDismiss()
-                Task { @MainActor in
-                    try? await Task.sleep(for: Timing.paletteHandoff)
-                    CommandActions.newFromTemplate()
-                }
+                CommandActions.newFromTemplate()
             } label: {
                 Label("New from Template…", systemImage: "doc.badge.plus")
             }
@@ -145,6 +118,7 @@ struct TabSwitcherView: View {
                 Section("Recently Closed") {
                     ForEach(session.recentlyClosed) { record in
                         Button {
+                            AppStateBus.shared.scenes.claimFocus(session: session)
                             CommandActions.reopenClosedTab(record)
                             onDismiss()
                         } label: {
@@ -156,16 +130,11 @@ struct TabSwitcherView: View {
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 18, weight: .semibold))
-                .frame(width: 36, height: 36)
+                .frame(width: 44, height: 44)
         } primaryAction: {
-            // Dismiss the switcher first so the blank editor appears
-            // after the switcher animation completes.
             AppStateBus.shared.scenes.claimFocus(session: session)
+            session.newTab()
             onDismiss()
-            Task { @MainActor in
-                try? await Task.sleep(for: Timing.paletteHandoff)
-                CommandActions.newTab()
-            }
         }
         .menuOrder(.fixed)
         .accessibilityLabel("New Tab")
@@ -173,27 +142,17 @@ struct TabSwitcherView: View {
 
     private func activate(_ tab: TabModel) {
         session.selectedTabID = tab.id
+        AppStateBus.shared.scenes.claimFocus(session: session)
         onDismiss()
     }
 
     private func close(_ tab: TabModel) {
-        // Dirty close → dismiss the switcher first, then trigger
-        // the close on the next runloop so the unsaved-changes
-        // dialog can present on the editor underneath. iOS only
-        // hosts one modal at a time per scene; firing the dialog
-        // while this sheet is up either drops the dialog silently
-        // (so the close goes through without a prompt — data loss
-        // risk) or wedges the app waiting for a modal it can't
-        // present. Clean tabs skip the dismissal so the user can
-        // keep killing them in sequence.
-        if CommandActions.tabNeedsCloseConfirmation(tab) {
+        // Return to the editor that owns the unsaved-changes alert.
+        // Clean tabs stay in overview for repeated closing.
+        if tab.needsCloseConfirmation {
             onDismiss()
-            DispatchQueue.main.async {
-                CommandActions.requestCloseTab(tab.id, in: session)
-            }
-        } else {
-            CommandActions.requestCloseTab(tab.id, in: session)
         }
+        CommandActions.requestCloseTab(tab.id, in: session)
     }
 }
 
@@ -203,7 +162,6 @@ private struct TabCard: View {
 
     @Bindable var tab: TabModel
     let isActive: Bool
-    let canClose: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
     let onPin: () -> Void
@@ -223,11 +181,13 @@ private struct TabCard: View {
             .opacity(1 - min(1, abs(dragOffset) / 240))
             .contentShape(.rect)
             .onTapGesture { onSelect() }
-            .gesture(swipeGesture)
+            .simultaneousGesture(swipeGesture)
             .contextMenu { contextMenu }
             .accessibilityElement(children: .combine)
             .accessibilityLabel(accessibilityLabel)
             .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : .isButton)
+            .accessibilityAction { onSelect() }
+            .accessibilityAction(named: "Close Tab") { onClose() }
     }
 
     @ViewBuilder
@@ -238,7 +198,7 @@ private struct TabCard: View {
         }
         .background(cardBackground)
         .overlay(cardBorder)
-        .overlay(alignment: .topLeading) { closeOverlay }
+        .overlay(alignment: .topLeading) { closeButton }
         .overlay(alignment: .topTrailing) { pinOverlay }
     }
 
@@ -250,13 +210,6 @@ private struct TabCard: View {
     private var cardBorder: some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
             .strokeBorder(isActive ? Color.accentColor : .clear, lineWidth: 2)
-    }
-
-    @ViewBuilder
-    private var closeOverlay: some View {
-        if canClose {
-            closeButton.padding(6)
-        }
     }
 
     @ViewBuilder
@@ -293,7 +246,7 @@ private struct TabCard: View {
             Text("New Document")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.primary)
-            Text("Templates · Drafts · Open File")
+            Text("Templates · Clipboard · Open File")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
         }
@@ -354,7 +307,7 @@ private struct TabCard: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
-            if tab.document.isDirty || tab.document.fileURL == nil {
+            if tab.needsCloseConfirmation {
                 Circle()
                     .fill(.secondary)
                     .frame(width: 6, height: 6)
@@ -372,6 +325,8 @@ private struct TabCard: View {
                 .foregroundStyle(.primary)
                 .padding(5)
                 .background(.thinMaterial, in: .circle)
+                .frame(width: 44, height: 44)
+                .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Close \(displayName)")
@@ -391,10 +346,8 @@ private struct TabCard: View {
                   systemImage: tab.isPinned ? "pin.slash" : "pin")
         }
         Divider()
-        if canClose {
-            Button(role: .destructive, action: onClose) {
-                Label("Close Tab", systemImage: "xmark")
-            }
+        Button(role: .destructive, action: onClose) {
+            Label("Close Tab", systemImage: "xmark")
         }
         Button(role: .destructive, action: onCloseOthers) {
             Label("Close Other Tabs", systemImage: "rectangle.stack.badge.minus")
@@ -407,29 +360,23 @@ private struct TabCard: View {
     private var swipeGesture: some Gesture {
         DragGesture(minimumDistance: 10)
             .onChanged { value in
-                // Only honour leftward swipes; rightward stays put.
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
                 dragOffset = min(0, value.translation.width)
             }
             .onEnded { value in
-                if canClose, value.translation.width < -swipeCommit {
-                    withAnimation(.appSwitcherCard) {
-                        dragOffset = -400
-                    }
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(180))
-                        onClose()
-                    }
-                } else {
-                    withAnimation(.appSwitcherCard) {
-                        dragOffset = 0
-                    }
+                // A canceled unsaved-changes alert must leave the card
+                // visible. Only actual tab removal removes its preview.
+                withAnimation(.appSwitcherCard) { dragOffset = 0 }
+                if value.translation.width < -swipeCommit,
+                   abs(value.translation.width) > abs(value.translation.height) {
+                    onClose()
                 }
             }
     }
 
     private var displayName: String {
         switch tab.kind {
-        case .launcher:   return "New"
+        case .launcher:   return "Start Page"
         case .fileBrowser: return "New Tab"
         case .editor:     return tab.document.displayName
         }
@@ -445,7 +392,7 @@ private struct TabCard: View {
 
     private var accessibilityLabel: String {
         let pinned = tab.isPinned ? "Pinned. " : ""
-        let dirty = (tab.document.isDirty || tab.document.fileURL == nil) ? "Unsaved. " : ""
+        let dirty = tab.needsCloseConfirmation ? "Unsaved. " : ""
         return "\(pinned)\(dirty)\(displayName)"
     }
 

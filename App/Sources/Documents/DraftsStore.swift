@@ -429,6 +429,38 @@ final class DraftsStore {
         }
     }
 
+    /// Read a recovery item and keep one durable copy under its existing
+    /// identity before retiring a scratch/legacy copy. Both automatic window
+    /// restoration and the exceptional recovery sheet use this handoff.
+    func loadForRestoration(_ draft: DraftRecord, allowEmpty: Bool = false) async throws -> (text: String, url: URL) {
+        guard draft.bytes <= PlainTextDocument.hardSizeCap else {
+            throw PlainTextDocument.DocumentError.fileTooLarge(bytes: draft.bytes)
+        }
+        func readableURL() -> URL {
+            draft.origin == .localScratch ? draft.url
+                : existingRecoveryURL(named: draft.recoveryFilename, preferred: draft.url) ?? draft.url
+        }
+        let initialURL = readableURL()
+        let text: String
+        do {
+            text = try await Self.readText(at: initialURL, allowEmpty: allowEmpty || draft.metadata != nil)
+        } catch {
+            // Legacy migration may have moved the file during the read.
+            let relocated = readableURL()
+            guard relocated != initialURL else { throw error }
+            text = try await Self.readText(at: relocated, allowEmpty: allowEmpty || draft.metadata != nil)
+        }
+        try Task.checkCancellation()
+        let destination = directory.appendingPathComponent(draft.recoveryFilename)
+        let url = try await save(text: text, existing: destination, metadata: draft.metadata)
+        if draft.origin == .localScratch {
+            ScratchStore.discard(url: draft.url)
+        } else {
+            ScratchStore.discard(replacingDraftFilename: draft.recoveryFilename)
+        }
+        return (text, url)
+    }
+
     /// One-way upgrade from the old Documents recovery folder. For
     /// each filename, preserve the newest copy: write it atomically to local
     /// Application Support, then remove all legacy copies. A download,
@@ -635,23 +667,20 @@ enum DraftRecoveryFailure: LocalizedError {
     case emptyDraft
     case invalidUTF8
     case downloadTimedOut
-    case migrationFailed
 
     var errorDescription: String? {
         switch self {
         case .emptyDraft:
-            "The recovery draft is empty. Its original file was left untouched."
+            "The recovery copy is empty. Its original file was left untouched."
         case .invalidUTF8:
-            "The recovery draft is damaged and couldn't be decoded. Its original file was left untouched."
+            "The recovery copy is damaged and couldn't be decoded. Its original file was left untouched."
         case .downloadTimedOut:
-            "The recovery draft couldn't be downloaded from iCloud in time. Try again when it is available locally."
-        case .migrationFailed:
-            "The local recovery snapshot couldn't be moved into the drafts folder. Its original snapshot was left untouched."
+            "The recovery copy couldn't be downloaded from iCloud in time. Try again when it is available locally."
         }
     }
 }
 
-/// Metadata for the debounced local crash shadow. The UUID keeps two
+/// Metadata for the local crash shadow. The UUID keeps two
 /// windows editing the same source from overwriting each other, while the
 /// revision key and draft filename reconnect the snapshot to its source and
 /// its last committed local recovery file after a hard process kill.
@@ -786,12 +815,14 @@ actor ScratchWriter {
         generationGate.note(generation, shouldKeepFile: false)
     }
 
-    func write(text: String, sidecar: ScratchSidecar, generation: UInt64) {
+    func write(text: String, sidecar: ScratchSidecar, generation: UInt64) throws {
         guard generationGate.isCurrent(generation) else { return }
-        try? ScratchStore.write(text: text, sidecar: sidecar)
-        if !generationGate.isCurrent(generation), !generationGate.wantsFile {
-            ScratchStore.discard(id: sidecar.id)
+        defer {
+            if !generationGate.isCurrent(generation), !generationGate.wantsFile {
+                ScratchStore.discard(id: sidecar.id)
+            }
         }
+        try ScratchStore.write(text: text, sidecar: sidecar)
     }
 
     func discard(id: UUID, generation: UInt64) {
@@ -821,23 +852,10 @@ enum DraftRecoveryWorkflow {
         into tab: TabModel,
         store: DraftsStore = .shared
     ) async throws -> SourceStaleCheck? {
-        guard draft.bytes <= PlainTextDocument.hardSizeCap else {
-            throw PlainTextDocument.DocumentError.fileTooLarge(bytes: draft.bytes)
-        }
-        let readableURL = readableURL(for: draft, store: store)
-        let text = try await DraftsStore.readText(
-            at: readableURL,
-            allowEmpty: draft.metadata != nil
-        )
+        let loaded = try await store.loadForRestoration(draft)
         let source = await loadSource(from: draft.metadata)
-        let existing = existingDraftURL(for: draft, readableURL: readableURL, store: store)
-        let adoptedDraftURL = try await store.save(
-            text: text,
-            existing: existing,
-            metadata: draft.metadata
-        )
-        discardOriginal(draft)
-        applyDraft(text, at: adoptedDraftURL, byteCount: draft.bytes, to: tab)
+        try Task.checkCancellation()
+        applyDraft(loaded.text, at: loaded.url, byteCount: draft.bytes, to: tab)
 
         guard let source else {
             tab.state.savedBaselineText = ""
@@ -852,40 +870,13 @@ enum DraftRecoveryWorkflow {
         return staleCheck
     }
 
-    private static func readableURL(for draft: DraftRecord, store: DraftsStore) -> URL {
-        guard draft.origin != .localScratch else { return draft.url }
-        return store.existingRecoveryURL(
-            named: draft.url.lastPathComponent,
-            preferred: draft.url
-        ) ?? draft.url
-    }
-
     private static func loadSource(from metadata: DraftMetadata?) async -> SourceRecovery? {
         guard let source = metadata?.sourceBookmark.flatMap(resolveBookmark) else { return nil }
-        let attributes = PlainTextDocument.diskAttrs(of: source.url)
         let payload = try? await PlainTextDocument.readPayload(from: source.url)
+        let attributes: DiskAttributes? = payload.flatMap { loaded in
+            loaded.modificationDate.map { ($0, loaded.data.count) }
+        }
         return SourceRecovery(source: source, attributes: attributes, payload: payload)
-    }
-
-    private static func existingDraftURL(
-        for draft: DraftRecord,
-        readableURL: URL,
-        store: DraftsStore
-    ) -> URL? {
-        guard draft.origin == .localScratch else { return readableURL }
-        return draft.replacesDraftFilename.flatMap { filename in
-            store.readDirectories
-                .map { $0.appendingPathComponent(filename) }
-                .first { FileManager.default.fileExists(atPath: $0.path) }
-        }
-    }
-
-    private static func discardOriginal(_ draft: DraftRecord) {
-        if draft.origin == .localScratch {
-            ScratchStore.discard(url: draft.url)
-        } else {
-            ScratchStore.discard(replacingDraftFilename: draft.url.lastPathComponent)
-        }
     }
 
     private static func applyDraft(

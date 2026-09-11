@@ -1,4 +1,5 @@
 import SwiftUI
+import EditorEngine
 
 /// Find, replace, and confirm-each-match workflows.
 struct FindReplaceSheet: View {
@@ -6,10 +7,17 @@ struct FindReplaceSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable private var bus = AppStateBus.shared
     let editor: EditorState
+    @State private var draft: FindContext
+
+    init(editor: EditorState) {
+        self.editor = editor
+        _draft = State(initialValue: AppStateBus.shared.find.context)
+    }
 
     @State private var showReplace: Bool = false
     @State private var queryMode: Bool = false
-    @State private var currentMatch: CommandActions.QueryReplaceMatch?
+    @State private var querySession: QueryReplacementSession?
+    private var currentMatch: DocumentSearch.Match? { querySession?.current }
     @State private var queryReplacedCount: Int = 0
     @State private var errorText: String?
     @State private var statusText: String?
@@ -20,31 +28,31 @@ struct FindReplaceSheet: View {
             Form {
                 Section {
                     TextField(
-                        bus.find.context.useRegex ? "Regular expression" : "Find",
-                        text: $bus.find.context.query
+                        draft.useRegex ? "Regular expression" : "Find",
+                        text: $draft.query
                     )
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                    .font(bus.find.context.useRegex ? .body.monospaced() : .body)
+                    .font(draft.useRegex ? .body.monospaced() : .body)
                     .focused($searchFieldFocused)
                     .onSubmit { primaryAction() }
 
                     if showReplace {
                         TextField(
-                            bus.find.context.useRegex ? "Replacement (supports $1, $2, …)" : "Replace with",
-                            text: $bus.find.context.replacement
+                            draft.useRegex ? "Replacement (supports $1, $2, …)" : "Replace with",
+                            text: $draft.replacement
                         )
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                        .font(bus.find.context.useRegex ? .body.monospaced() : .body)
+                        .font(draft.useRegex ? .body.monospaced() : .body)
                     }
                 }
 
                 Section("Options") {
-                    Toggle("Regular Expression", isOn: $bus.find.context.useRegex)
-                    Toggle("Case Sensitive",    isOn: $bus.find.context.caseSensitive)
-                    Toggle("Whole Word",        isOn: $bus.find.context.wholeWord)
-                        .disabled(bus.find.context.useRegex)
+                    Toggle("Regular Expression", isOn: $draft.useRegex)
+                    Toggle("Case Sensitive",    isOn: $draft.caseSensitive)
+                    Toggle("Whole Word",        isOn: $draft.wholeWord)
+                        .disabled(draft.useRegex)
                 }
 
                 Section {
@@ -52,7 +60,7 @@ struct FindReplaceSheet: View {
                     if showReplace {
                         Toggle("Query Mode (confirm each match)", isOn: $queryMode)
                             .onChange(of: queryMode) { _, _ in
-                                currentMatch = nil
+                                querySession = nil
                                 clearMessages()
                             }
                     }
@@ -71,13 +79,19 @@ struct FindReplaceSheet: View {
                     Section { Text(errorText).font(.footnote).foregroundStyle(.red) }
                 }
             }
-            .navigationTitle(queryMode ? "Query Replace" : "Find")
+            .navigationTitle(queryMode && showReplace ? "Query Replace" : (showReplace ? "Find & Replace" : "Find"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            .onChange(of: draft) { _, _ in
+                querySession = nil
+                queryReplacedCount = 0
+                clearMessages()
+            }
+            .onDisappear { bus.find.context = draft }
             .onAppear {
                 claimOwner()
                 searchFieldFocused = true
@@ -106,7 +120,7 @@ struct FindReplaceSheet: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .disabled(bus.find.context.query.isEmpty)
+                .disabled(draft.query.isEmpty)
                 Button {
                     stepNext()
                 } label: {
@@ -114,7 +128,7 @@ struct FindReplaceSheet: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(bus.find.context.query.isEmpty)
+                .disabled(draft.query.isEmpty)
             }
 
             if showReplace {
@@ -124,13 +138,13 @@ struct FindReplaceSheet: View {
                     }
                     .buttonStyle(.bordered)
                     .frame(maxWidth: .infinity)
-                    .disabled(bus.find.context.query.isEmpty)
+                    .disabled(draft.query.isEmpty)
                     Button("Replace All", role: .destructive) {
                         replaceAll()
                     }
                     .buttonStyle(.bordered)
                     .frame(maxWidth: .infinity)
-                    .disabled(bus.find.context.query.isEmpty)
+                    .disabled(draft.query.isEmpty)
                 }
             }
         }
@@ -143,14 +157,13 @@ struct FindReplaceSheet: View {
                 Button("Find First Match") { queryAdvance() }
                     .buttonStyle(.borderedProminent)
                     .frame(maxWidth: .infinity)
-                    .disabled(bus.find.context.query.isEmpty)
+                    .disabled(draft.query.isEmpty)
             }
         } else {
             Section("Current Match") {
                 HStack(spacing: 12) {
                     Button("Replace") {
                         queryReplaceCurrent()
-                        queryAdvance()
                     }
                     .buttonStyle(.borderedProminent)
                     .frame(maxWidth: .infinity)
@@ -172,179 +185,102 @@ struct FindReplaceSheet: View {
                 queryAdvance()
             } else {
                 queryReplaceCurrent()
-                queryAdvance()
             }
         } else {
             stepNext()
         }
     }
 
-    private func stepNext() {
-        clearMessages()
-        claimOwner()
-        CommandActions.stepToMatch(forward: true)
-    }
+    private func stepNext() { step(forward: true) }
+    private func stepPrevious() { step(forward: false) }
 
-    private func stepPrevious() {
-        clearMessages()
-        claimOwner()
-        CommandActions.stepToMatch(forward: false)
+    private func step(forward: Bool) {
+        run { statusText = try CommandActions.selectSearchMatch(forward: forward) }
     }
 
     private func replaceCurrentAndAdvance() {
-        clearMessages()
-        claimOwner()
-        guard let textView = editor.textView else { return }
-        let ctx = bus.find.context
-        if textView.selectedRange.length > 0,
-           let selected = textView.text(in: textView.selectedRange),
-           currentSelectionMatches(selected, against: ctx) {
-            let replacement = ctx.useRegex
-                ? evaluatedReplacement(for: selected, context: ctx) ?? ctx.replacement
-                : ctx.replacement
-            textView.replace(textView.selectedRange, withText: replacement)
-            editor.setText?(textView.text)
+        run {
+            _ = try CommandActions.replaceSelectedMatch()
+            statusText = try CommandActions.selectSearchMatch(forward: true)
         }
-        CommandActions.stepToMatch(forward: true)
     }
 
     private func replaceAll() {
-        clearMessages()
-        claimOwner()
-        guard let textView = editor.textView else { return }
-        let ctx = bus.find.context
-        var cursor = 0
-        var count = 0
-        do {
-            let length = (textView.text as NSString).length
-            while cursor < length,
-                  let match = try CommandActions.matchInDocument(
-                    context: ctx,
-                    forward: true,
-                    startingAt: cursor,
-                    totalLength: (textView.text as NSString).length
-                  ) {
-                textView.replace(match.range, withText: match.replacement)
-                count += 1
-                cursor = match.range.location + (match.replacement as NSString).length
-                // Zero-width matches (`a*`, `^`) with an empty replacement
-                // never move the cursor — force it past the match site.
-                if match.range.length == 0 { cursor += 1 }
-            }
-            editor.setText?(textView.text)
-            statusText = "Replaced \(count) match\(count == 1 ? "" : "es")."
-        } catch {
-            errorText = error.localizedDescription
-        }
+        run { statusText = "Replaced \(try CommandActions.replaceAllMatches()) matches." }
     }
-
-    // MARK: - Query mode actions
-
-    private var resolvedQuery: String {
-        let ctx = bus.find.context
-        if !ctx.wholeWord { return ctx.query }
-        let inner = ctx.useRegex ? ctx.query : NSRegularExpression.escapedPattern(for: ctx.query)
-        return #"\b"# + inner + #"\b"#
-    }
-
-    private var resolvedUseRegex: Bool { bus.find.context.useRegex || bus.find.context.wholeWord }
 
     private func queryAdvance() {
-        errorText = nil
-        // `revealMatch` parked the selection at the current match's
-        // start, so restarting the search there re-finds the same
-        // match and Skip never advances — resume past its end.
-        let cursor: Int
-        if let match = currentMatch {
-            cursor = max(NSMaxRange(match.range), match.range.location + 1)
-        } else {
-            cursor = editor.selectedRange.location
-        }
-        do {
-            claimOwner()
-            if let match = try CommandActions.nextQueryReplaceMatch(
-                query: resolvedQuery,
-                replacement: bus.find.context.replacement,
-                useRegex: resolvedUseRegex,
-                caseSensitive: bus.find.context.caseSensitive,
-                startingAt: cursor
-            ) {
-                currentMatch = match
-                CommandActions.revealMatch(match)
-                statusText = nil
+        run {
+            guard let textView = editor.textView else { return }
+            if querySession == nil {
+                querySession = QueryReplacementSession(search: try CommandActions.documentSearch(in: textView),
+                                                       startingAt: textView.selectedRange.location)
             } else {
-                currentMatch = nil
-                statusText = queryReplacedCount > 0
-                    ? "No more matches. Replaced \(queryReplacedCount)."
-                    : "No matches."
+                try validateQuery(in: textView)
+                querySession?.skip()
             }
-        } catch {
-            errorText = error.localizedDescription
-            currentMatch = nil
+            revealQueryMatch()
         }
     }
 
     private func queryReplaceCurrent() {
-        guard let match = currentMatch else { return }
-        claimOwner()
-        CommandActions.applyQueryReplaceMatch(match)
-        queryReplacedCount += 1
-        currentMatch = nil
-    }
-
-    private func queryReplaceAll() {
-        errorText = nil
-        claimOwner()
-        var cursor = editor.selectedRange.location
-        var count = 0
-        do {
-            while let match = try CommandActions.nextQueryReplaceMatch(
-                query: resolvedQuery,
-                replacement: bus.find.context.replacement,
-                useRegex: resolvedUseRegex,
-                caseSensitive: bus.find.context.caseSensitive,
-                startingAt: cursor
-            ) {
-                CommandActions.applyQueryReplaceMatch(match)
-                count += 1
-                cursor = match.range.location + (match.replacement as NSString).length
-                // Same zero-width guard as replaceAll().
-                if match.range.length == 0 { cursor += 1 }
-            }
-            queryReplacedCount += count
-            currentMatch = nil
-            statusText = "Replaced \(count) match\(count == 1 ? "" : "es")."
-        } catch {
-            errorText = error.localizedDescription
+        run {
+            guard let textView = editor.textView, let match = currentMatch else { return }
+            try validateQuery(in: textView)
+            textView.replaceText(in: BatchReplaceSet(replacements: [.init(range: match.range, text: match.replacement)]))
+            querySession?.acceptReplacement(actualText: textView.text)
+            queryReplacedCount += 1
+            revealQueryMatch()
         }
     }
 
-    // MARK: - Helpers
-
-    private func clearMessages() {
-        statusText = nil
-        errorText = nil
+    private func queryReplaceAll() {
+        run {
+            guard let textView = editor.textView, let session = querySession else { return }
+            try validateQuery(in: textView)
+            // Collect pending ranges before performing a single undoable edit.
+            var walk = session
+            var replacements: [BatchReplaceSet.Replacement] = []
+            while let match = walk.current {
+                replacements.append(.init(range: match.range, text: match.replacement))
+                walk.skip()
+            }
+            textView.replaceText(in: BatchReplaceSet(replacements: replacements))
+            queryReplacedCount += replacements.count
+            querySession = nil
+            statusText = "Replaced \(queryReplacedCount) matches."
+        }
     }
 
-    private func claimOwner() {
-        bus.scenes.claimFocus(state: editor)
+    private func validateQuery(in textView: PilcrowTextView) throws {
+        guard querySession?.expectedText == textView.text else {
+            querySession = nil
+            throw QueryError.documentChanged
+        }
     }
 
-    private func currentSelectionMatches(_ selected: String, against ctx: FindContext) -> Bool {
-        if ctx.useRegex || ctx.wholeWord { return true }
-        return ctx.caseSensitive
-            ? selected == ctx.query
-            : selected.compare(ctx.query, options: .caseInsensitive) == .orderedSame
+    private enum QueryError: LocalizedError {
+        case documentChanged
+        var errorDescription: String? { "The document changed. Find the first match again before replacing." }
     }
 
-    private func evaluatedReplacement(for selected: String, context: FindContext) -> String? {
-        let options: NSRegularExpression.Options = context.caseSensitive ? [] : [.caseInsensitive]
-        guard let regex = try? NSRegularExpression(pattern: context.query, options: options),
-              let match = regex.firstMatch(
-                in: selected,
-                range: NSRange(selected.startIndex..., in: selected)
-              )
-        else { return nil }
-        return regex.replacementString(for: match, in: selected, offset: 0, template: context.replacement)
+    private func revealQueryMatch() {
+        if let match = currentMatch {
+            CommandActions.revealMatch(match)
+        } else {
+            querySession = nil
+            statusText = "No more matches. Replaced \(queryReplacedCount)."
+        }
     }
+
+    private func run(_ action: () throws -> Void) {
+        clearMessages()
+        claimOwner()
+        bus.find.context = draft
+        do { try action() }
+        catch { errorText = error.localizedDescription }
+    }
+
+    private func clearMessages() { statusText = nil; errorText = nil }
+    private func claimOwner() { bus.scenes.claimFocus(state: editor) }
 }

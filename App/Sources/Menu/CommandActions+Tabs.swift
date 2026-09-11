@@ -6,25 +6,19 @@ extension CommandActions {
 
     // MARK: - Move / detach
 
-    /// Detaches the tab and lands it in a fresh editor scene via
-    /// `pending.adoptedTab`. `toNewWindow:` is the only mode today;
-    /// the parameter leaves room for a "Move to Other Window" picker.
-    static func moveTab(_ tabID: UUID, toNewWindow: Bool) {
+    /// Keep the tab in its source window until its destination receives
+    /// the identified request. A failed window open cannot orphan the tab.
+    static func moveTabToNewWindow(_ tabID: UUID) {
         guard DeviceIdiom.supportsMultipleWindows,
-              let source = Self.context.scenes.session(containing: tabID),
-              source.tabs.count > 1,
-              let tab = source.detachTab(tabID)
-        else { return }
-        Self.context.pending.adoptedTab = tab
-        Self.context.scenes.requestOpenWindow(.editor)
-        Self.context.scenes.openWindow?(.editor)
+              let source = Self.context.scenes.session(containing: tabID), source.tabs.count > 1,
+              source.tabs.contains(where: { $0.id == tabID }) else { return }
+        Self.context.scenes.openEditorWindow?(.moveTab(tabID))
     }
 
     // MARK: - Close / confirm
 
     /// ⌘W closes the active tab. Closing the final tab now leaves the
-    /// window with a fresh launcher tab instead of destroying it —
-    /// matching Safari iPad's "Start Page". Use `closeWindow()`
+    /// window with a fresh start page. Use `closeWindow()`
     /// (⌘⇧W) when the user actually wants the window gone.
     static func closeActiveTab() {
         guard let session = Self.session else { return }
@@ -35,33 +29,33 @@ extension CommandActions {
     /// session). iPad-only; iPhone is single-window and the system
     /// request is a no-op there.
     static func closeWindow(session: EditorSession? = nil) {
+        guard DeviceIdiom.supportsMultipleWindows else { return }
         let target = session ?? Self.session
-        Task { @MainActor in
-            if let target,
-               let scene = SessionsStore.shared.scene(forSceneUUID: target.sceneUUID) {
-                await closeWindow(target, scene: scene)
-            } else {
-                await destroyForegroundWindowScene()
-            }
-        }
-    }
-
-    private static func closeWindow(_ target: EditorSession, scene: UIScene) async {
-        target.isClosingWindow = true
-        target.tabs.forEach { $0.state.textView?.resignFirstResponder() }
-        let closeArchive: ([ClosedTabRecord], ClosedWindowRecord?)
-        do {
-            closeArchive = try await archiveWindowBeforeClosing(target)
-        } catch {
-            target.isClosingWindow = false
-            Self.context.presentation.openErrorMessage =
-                "Couldn't preserve the window before closing: \(error.localizedDescription)"
+        if let request = target?.requestClose {
+            request(.window)
             return
         }
-        let closedRecords = closeArchive.0
-        let archivedWindow = closeArchive.1
-        SessionsStore.shared.remove(forScene: target.sceneUUID)
+        // An unregistered scene must not fall back to an arbitrary foreground
+        // window: multiple windows can be foreground-active on iPad.
+        target?.activeTab.state.operationError = "The window is not ready to close. Please try again."
+    }
+
+    static func saveAllAndCloseWindow(session: EditorSession? = nil) {
+        guard DeviceIdiom.supportsMultipleWindows else { return }
+        let target = session ?? Self.session
+        guard let save = target?.requestSaveAllAndCloseWindow else {
+            target?.activeTab.state.operationError = "The window is not ready to save and close. Please try again."
+            return
+        }
+        save()
+    }
+
+    static func closeWindow(_ target: EditorSession, scene: UIScene, discardChanges: Bool = false) {
+        guard target.prepareForWindowClose(discardChanges: discardChanges) else { return }
         Self.context.scenes.focusSurvivingSession(excludingSceneUUID: target.sceneUUID)
+        // This decision has already been confirmed. Do not wait for the next
+        // SwiftUI update to remove the native confirmation configuration.
+        (scene as? UIWindowScene)?.closureConfirmation = nil
         UIApplication.shared.requestSceneSessionDestruction(
             scene.session,
             options: nil,
@@ -69,250 +63,61 @@ extension CommandActions {
                 Task { @MainActor in
                     target.isClosingWindow = false
                     Self.context.scenes.claimFocus(session: target)
-                    SessionsStore.shared.save(
-                        SessionRecord(scene: target.sceneUUID, session: target)
-                    )
-                    if let archivedWindow {
-                        ClosedWindowsStore.shared.cancelArchive(archivedWindow.id)
+                    // The live buffers remain authoritative if UIKit refuses
+                    // the close. Reestablish their private checkpoints.
+                    var message = "Couldn't close the window: \(error.localizedDescription)"
+                    do {
+                        try await target.checkpointDocuments()
+                    } catch {
+                        message += " Recovery checkpoint failed: \(error.localizedDescription)"
                     }
-                    closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
-                    Self.context.presentation.openErrorMessage =
-                        "Couldn't close the window: \(error.localizedDescription)"
+                    target.persistRestorationRecord()
+                    target.activeTab.state.operationError = message
                 }
             }
         )
-    }
-
-    /// Last-resort fallback when the acting session's scene isn't
-    /// registered yet. With several windows visible, multiple scenes
-    /// are simultaneously `.foregroundActive` and `connectedScenes`
-    /// is unordered — this can pick the wrong window, so callers
-    /// should go through `closeWindow(session:)`.
-    static func destroyForegroundWindowScene() async {
-        guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) else { return }
-        let target = Self.context.scenes.allOpenSessions.first(where: {
-            SessionsStore.shared.scene(forSceneUUID: $0.sceneUUID) === scene
-        })
-        let closeArchive: ([ClosedTabRecord], ClosedWindowRecord?)
-        do {
-            if let target {
-                target.isClosingWindow = true
-                target.tabs.forEach { $0.state.textView?.resignFirstResponder() }
-                closeArchive = try await archiveWindowBeforeClosing(target)
-            } else {
-                closeArchive = ([], nil)
-            }
-        } catch {
-            target?.isClosingWindow = false
-            Self.context.presentation.openErrorMessage =
-                "Couldn't preserve the window before closing: \(error.localizedDescription)"
-            return
-        }
-        let closedRecords = closeArchive.0
-        let archivedWindow = closeArchive.1
-        if let target {
-            Self.context.scenes.focusSurvivingSession(
-                excludingSceneUUID: target.sceneUUID
-            )
-        }
-        SessionsStore.shared.removeRecord(
-            forPersistentIdentifier: scene.session.persistentIdentifier
-        )
-        UIApplication.shared.requestSceneSessionDestruction(
-            scene.session,
-            options: nil,
-            errorHandler: { error in
-                Task { @MainActor in
-                    if let target {
-                        target.isClosingWindow = false
-                        Self.context.scenes.claimFocus(session: target)
-                        SessionsStore.shared.save(
-                            SessionRecord(scene: target.sceneUUID, session: target)
-                        )
-                        if let archivedWindow {
-                            ClosedWindowsStore.shared.cancelArchive(archivedWindow.id)
-                        }
-                        closedRecords.forEach { ClosedTabsStore.shared.remove($0.id) }
-                    }
-                    Self.context.presentation.openErrorMessage =
-                        "Couldn't close the window: \(error.localizedDescription)"
-                }
-            }
-        )
-    }
-
-    /// Pull exact live buffers and await their recovery writes before asking
-    /// UIKit to destroy the scene. Encoding and disk I/O run on the recovery
-    /// writer actor, not the main actor.
-    private static func archiveWindowBeforeClosing(
-        _ target: EditorSession
-    ) async throws -> ([ClosedTabRecord], ClosedWindowRecord?) {
-        try await DraftsStore.shared.withCapEnforcementSuspended {
-            for tab in target.tabs where tab.document.isDirty {
-                if let live = tab.state.textView?.text {
-                    tab.document.text = live
-                }
-                try await tab.document.commitRecoverySnapshot()
-            }
-        }
-
-        let closedRecords = target.tabs.map(EditorSession.snapshotRecord(of:))
-        closedRecords.forEach { ClosedTabsStore.shared.record($0) }
-        let sessionRecord = SessionRecord(scene: target.sceneUUID, session: target)
-        let archivedWindow = ClosedWindowsStore.shared.archive(
-            sessionRecord,
-            closedTabRecordIDs: closedRecords.map(\.id)
-        )
-        DraftsStore.shared.enforceCapNow()
-        return (closedRecords, archivedWindow)
     }
 
     /// Single entry point so every UI surface (pill ×, swipe-to-
     /// close, context menu, ⌘W) gets the same unsaved-changes warning.
     static func requestCloseTab(_ tabID: UUID, in session: EditorSession) {
         guard let tab = session.tabs.first(where: { $0.id == tabID }) else { return }
-        if shouldWarnBeforeClose(tab) {
-            Self.context.presentation.pendingClose = PendingClose(
-                sessionID: ObjectIdentifier(session),
-                tabID: tabID,
-                displayName: tab.document.displayName,
-                isUntitled: tab.document.fileURL == nil
-            )
-        } else {
-            _ = session.closeTab(tabID)
-        }
-    }
-
-    /// `.discard` disposition so the buffer is NOT archived to
-    /// ClosedTabsStore — a deliberate throw-away mustn't be
-    /// resurrectable via ⇧⌘T. Drops the scratch shadow too.
-    static func confirmDiscardAndClose(_ pending: PendingClose) {
-        defer { Self.context.presentation.pendingClose = nil }
-        guard let (session, tab) = Self.resolveSession(for: pending) else { return }
-        tab.document.deleteScratchFile()
-        session.closeTab(pending.tabID, disposition: .discard)
-    }
-
-    /// URL-backed: save then close. Untitled: route to Save As, tab
-    /// stays open. On save failure: surface the error and KEEP the
-    /// tab — closing would silently destroy the buffer.
-    static func confirmSaveAndClose(_ pending: PendingClose) {
-        guard let (session, tab) = Self.resolveSession(for: pending) else {
-            Self.context.presentation.pendingClose = nil
-            return
-        }
-        guard tab.document.fileURL != nil else {
-            Self.context.pickers.pending = .saveAs
-            Self.context.presentation.pendingClose = nil
-            return
-        }
-        // Same funnel as ⌘S so the live-text flush and stale-source
-        // check apply — a raised stale dialog (or failed write) keeps
-        // the tab open for the user to resolve.
-        let saved = saveDocumentSafely(tab, session: session)
-        Self.context.presentation.pendingClose = nil
-        if saved {
-            session.closeTab(pending.tabID)
-        }
-    }
-
-    /// "Save as Draft" path from the close dialog + title menu:
-    /// force a draft snapshot of the live text so the launcher can
-    /// resume it, then close (archive disposition — both the draft
-    /// and the closed-tab record become recovery vehicles). Same
-    /// The close awaits the committed write so the last keystroke cannot be
-    /// lost when the debounce has not fired yet.
-    static func saveAsDraftAndClose(_ pending: PendingClose) {
-        guard let (session, tab) = Self.resolveSession(for: pending) else { return }
-        Task { @MainActor in
-            defer { Self.context.presentation.pendingClose = nil }
-            do {
-                try await snapshotDraft(for: tab, endEditing: true)
-                session.closeTab(pending.tabID)
-            } catch {
-                Self.context.presentation.openErrorMessage =
-                    "Couldn't save the recovery draft: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    /// Title-menu / palette entry — captures the buffer into the
-    /// draft store without closing.
-    static func saveAsDraft() {
-        guard let session = Self.context.scenes.currentSession,
-              let tab = session.tabs.first(where: { $0.id == session.selectedTabID })
-        else { return }
-        Task { @MainActor in
-            do {
-                try await snapshotDraft(for: tab, endEditing: false)
-            } catch {
-                Self.context.presentation.openErrorMessage =
-                    "Couldn't save the recovery draft: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private static func snapshotDraft(for tab: TabModel, endEditing: Bool) async throws {
-        if endEditing {
-            tab.state.textView?.resignFirstResponder()
-        }
-        if let live = tab.state.textView?.text {
-            tab.document.text = live
-        }
-        // The user is closing or explicitly Save-as-Drafting, so commit the
-        // live bytes to device-local recovery; per-keystroke autosave only
-        // updates scratch.
-        try await tab.document.commitRecoverySnapshot()
-    }
-
-    static func cancelPendingClose() {
-        Self.context.presentation.pendingClose = nil
+        requestCloseTabs([tab], in: session)
     }
 
     // MARK: - Stale-source safeguard
 
-    /// Run before any ⌘S that's targeting an existing `fileURL`.
-    /// Returns `true` when the caller should proceed with the
-    /// actual write — `false` means we've raised a stale dialog
-    /// and the user has to resolve it first.
+    /// Source validation and the write share one coordinated access.
     @discardableResult
-    static func saveDocumentSafely(_ tab: TabModel, session: EditorSession) -> Bool {
-        guard let url = tab.document.fileURL else {
+    static func saveDocumentSafely(_ tab: TabModel, overwrite: Bool = false) async -> Bool {
+        guard tab.document.fileURL != nil else {
             Self.context.pickers.pending = .saveAs
             return false
         }
-        guard let attrs = PlainTextDocument.diskAttrs(of: url) else {
-            Self.context.presentation.sourceStaleCheck = .missing(
-                tabID: tab.id,
-                displayName: tab.document.displayName
-            )
+        guard !tab.document.isSaving else { return false }
+        do {
+            try await DocumentWorkflow.save(tab, overwrite: overwrite)
+            return true
+        } catch is CancellationError {
             return false
-        }
-        // A nil baseline means the load never completed, so we
-        // can't prove the buffer reflects the disk bytes — warn
-        // instead of overwriting silently. (Save Anyway works:
-        // `save()` refreshes the baseline after writing.)
-        let baselineMatches = tab.document.sourceMtimeAtLoad == attrs.mtime
-            && tab.document.sourceSizeAtLoad == attrs.size
-        if !baselineMatches {
+        } catch PlainTextDocument.DocumentError.sourceChanged {
             Self.context.presentation.sourceStaleCheck = .changedOnSave(
-                tabID: tab.id,
-                displayName: tab.document.displayName
-            )
-            return false
+                tabID: tab.id, displayName: tab.document.displayName)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            Self.context.presentation.sourceStaleCheck = .missing(
+                tabID: tab.id, displayName: tab.document.displayName)
+        } catch {
+            Self.context.presentation.openErrorMessage =
+                "Couldn't save \(tab.document.displayName): \(error.localizedDescription)"
         }
-        return performSave(tab: tab)
+        return false
     }
 
-    /// "Save Anyway" path off the stale dialog — bypasses the disk
-    /// check and writes over whatever's there now. The user
-    /// acknowledged data loss.
     static func forceSaveAfterStale() {
-        defer { Self.context.presentation.sourceStaleCheck = nil }
         guard let check = Self.context.presentation.sourceStaleCheck,
-              let (_, tab) = resolveTab(for: check)
-        else { return }
-        _ = performSave(tab: tab)
+              let (_, tab) = resolveTab(for: check) else { return }
+        Self.context.presentation.sourceStaleCheck = nil
+        Task { @MainActor in _ = await saveDocumentSafely(tab, overwrite: true) }
     }
 
     /// "Reload" path off the stale dialog — discards the buffer's
@@ -334,21 +139,27 @@ extension CommandActions {
         }
     }
 
-    /// "Continue Editing" path off the `changedOnAdopt` dialog —
-    /// keeps the drafted text but bumps the load-time baseline to
-    /// the disk's current attrs so the next ⌘S doesn't re-warn for
-    /// the same drift.
+    /// Accept the current disk version as the draft's new save baseline,
+    /// retaining the recovered text and its selected encoding.
     static func acceptStaleAdopt() {
-        defer { Self.context.presentation.sourceStaleCheck = nil }
         guard let check = Self.context.presentation.sourceStaleCheck,
-              case .changedOnAdopt = check,
-              let (_, tab) = resolveTab(for: check),
-              let url = tab.document.fileURL,
-              let attrs = PlainTextDocument.diskAttrs(of: url)
-        else { return }
-        tab.document.sourceMtimeAtLoad = attrs.mtime
-        tab.document.sourceSizeAtLoad = attrs.size
-        tab.state.requestEditorFocus()
+              case .changedOnAdopt = check, let (_, tab) = resolveTab(for: check),
+              let url = tab.document.fileURL else { return }
+        let presentation = Self.context.presentation
+        presentation.sourceStaleCheck = nil
+        let generation = tab.state.loadGeneration
+        Task { @MainActor in
+            do {
+                let payload = try await PlainTextDocument.readPayload(from: url)
+                guard tab.state.loadGeneration == generation, tab.document.fileURL == url else { return }
+                tab.document.originalData = payload.data
+                tab.document.sourceMtimeAtLoad = payload.modificationDate
+                tab.document.sourceSizeAtLoad = payload.data.count
+                tab.state.requestEditorFocus()
+            } catch {
+                presentation.openErrorMessage = "Couldn't read the current source: " + error.localizedDescription
+            }
+        }
     }
 
     /// "OK" off the source-missing dialog — the file's gone, so
@@ -370,26 +181,6 @@ extension CommandActions {
         tab.state.requestEditorFocus()
     }
 
-    private static func performSave(tab: TabModel) -> Bool {
-        let live = tab.state.textView?.text ?? tab.document.text
-        let prepared = tab.document.preparedTextForSaving(live)
-        if prepared != live, let textView = tab.state.textView {
-            let fullRange = NSRange(location: 0, length: (live as NSString).length)
-            textView.replace(fullRange, withText: prepared)
-        }
-        tab.document.text = prepared
-        tab.state.text = prepared
-        do {
-            try tab.document.save()
-            tab.state.savedBaselineText = prepared
-            return true
-        } catch {
-            Self.context.presentation.openErrorMessage =
-                "Couldn't save \(tab.document.displayName): \(error.localizedDescription)"
-            return false
-        }
-    }
-
     /// Walks every open session for a tab matching the stale-check.
     private static func resolveTab(for check: SourceStaleCheck) -> (EditorSession, TabModel)? {
         let tabID: UUID
@@ -405,38 +196,6 @@ extension CommandActions {
         return nil
     }
 
-    /// Shared by save / discard handlers so both reach the same
-    /// definition of "the targeted tab."
-    private static func resolveSession(for pending: PendingClose) -> (EditorSession, TabModel)? {
-        let sessions = Self.context.scenes.allOpenSessions
-        guard let session = sessions.first(where: { ObjectIdentifier($0) == pending.sessionID }),
-              let tab = session.tabs.first(where: { $0.id == pending.tabID })
-        else { return nil }
-        return (session, tab)
-    }
-
-    /// Untitled-with-content or URL-backed-and-dirty triggers the
-    /// dialog. Empty untitled scratches close silently — losing zero
-    /// bytes isn't worth a confirmation.
-    private static func shouldWarnBeforeClose(_ tab: TabModel) -> Bool {
-        // Pull the engine's live buffer — `document.text` is a 300 ms
-        // snapshot and a one-character untitled buffer + immediate
-        // ⌘W would otherwise sail past the warning.
-        let liveText = tab.state.textView?.text ?? tab.document.text
-        if tab.document.fileURL == nil {
-            return !liveText.isEmpty
-        }
-        return tab.document.isDirty
-    }
-
-    /// Public peek — sheet-hosting UI (switcher, palette) checks
-    /// this so it can dismiss itself before the dialog. iOS hosts
-    /// one modal per scene; presenting under another sheet drops
-    /// the dialog silently or wedges the app.
-    static func tabNeedsCloseConfirmation(_ tab: TabModel) -> Bool {
-        shouldWarnBeforeClose(tab)
-    }
-
     // MARK: - Draft recovery
 
     /// Two paths off the recovery sheet:
@@ -447,10 +206,17 @@ extension CommandActions {
     ///   - Untitled: bytes load into a fresh Untitled tab; `draftURL`
     ///     is inherited so the next autosave overwrites the same file
     ///     instead of orphaning the old one.
-    static func recoverDraft(_ draft: DraftRecord) {
-        guard let session = Self.session else { return }
+    static func recoverDraft(_ draft: DraftRecord, in session: EditorSession) {
+        guard Self.context.scenes.allOpenSessions.contains(where: { $0 === session }) else { return }
         let tab = session.newTab(kind: .editor)
-        Task {
+        tab.document.isLoading = true
+        tab.state.loadTask = Task { @MainActor [weak session, weak tab] in
+            guard let session, let tab else { return }
+            defer {
+                tab.document.isLoading = false
+                tab.state.loadTask = nil
+                session.persistRestorationRecord()
+            }
             do {
                 if let staleCheck = try await DraftRecoveryWorkflow.adopt(draft, into: tab) {
                     context.presentation.sourceStaleCheck = staleCheck
@@ -467,13 +233,26 @@ extension CommandActions {
     /// Restore a closed tab group into its own scene. The archive remains
     /// durable until the new EditorScene consumes it, so a failed or delayed
     /// window request cannot orphan the underlying recovery drafts.
-    static func recoverClosedWindow(_ record: ClosedWindowRecord) {
+    static func recoverClosedWindow(_ record: ClosedWindowRecord, in session: EditorSession) {
+        guard Self.context.scenes.allOpenSessions.contains(where: { $0 === session }) else { return }
+        if !DeviceIdiom.supportsMultipleWindows {
+            let recovered = record.sessionRecord(sceneUUID: session.sceneUUID,
+                launchID: SessionsStore.shared.currentLaunchID,
+                persistentIdentifier: SessionsStore.shared.persistentIdentifier(forSceneUUID: session.sceneUUID))
+            let append = session.tabs.count > 1 || session.activeTab.kind != .launcher
+            var combined = SessionRecord(scene: session.sceneUUID, session: session)
+            combined.activeIndex = combined.tabs.count + recovered.activeIndex
+            combined.tabs += recovered.tabs
+            SessionsStore.shared.save(combined)
+            SessionRestore.apply(recovered, to: session, append: append)
+            ClosedWindowsStore.shared.completeRestore(record.id)
+            return
+        }
         guard let openEditorWindow = Self.context.scenes.openEditorWindow else {
             Self.context.presentation.openErrorMessage =
                 "A new window isn't available yet. The recovered window was kept so you can try again."
             return
         }
-        ClosedWindowsStore.shared.dismissNotice()
         openEditorWindow(.restoreClosedWindow(record.id))
     }
 
@@ -488,15 +267,13 @@ extension CommandActions {
         let language = source.state.languageIdentifier
         let encoding = source.document.fileEncoding
         let lineEnding = source.document.lineEnding
-        let tab = session.newTab()
-        tab.document.text = snapshot
-        tab.document.isDirty = true
+        let tab = session.newTab(kind: .editor)
         tab.document.fileEncoding = encoding
         tab.document.lineEnding = lineEnding
-        tab.state.text = snapshot
-        tab.state.languageIdentifier = language
         tab.state.fileEncoding = encoding
         tab.state.lineEnding = lineEnding
+        tab.state.languageIdentifier = language
+        tab.startDocument(with: snapshot)
     }
 
     /// Preserves the original extension unless the user typed one
@@ -520,16 +297,26 @@ extension CommandActions {
         }
         guard finalName != oldURL.lastPathComponent else { return }
         let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(finalName)
-        let scoped = oldURL.startAccessingSecurityScopedResource()
-        defer { if scoped { oldURL.stopAccessingSecurityScopedResource() } }
-        do {
-            try FileManager.default.moveItem(at: oldURL, to: newURL)
-            document.fileURL = newURL
-            state.fileURL = newURL
-            RecentFilesStore.shared.record(newURL)
-        } catch {
-            Self.context.presentation.openErrorMessage =
-                "Couldn't rename \(oldURL.lastPathComponent): \(error.localizedDescription)"
+        guard !finalName.contains("/"), finalName != ".", finalName != "..", !finalName.contains("\u{0}") else {
+            state.operationError = "Enter a filename without path separators."
+            return
+        }
+        guard !document.isSaving, !document.isLoading else { return }
+        document.isSaving = true
+        Task { @MainActor in
+            defer { document.isSaving = false }
+            do {
+                let movedURL = try await CoordinatedFileAccess.move(from: oldURL, to: newURL)
+                guard document.fileURL == oldURL || document.fileURL == movedURL else { return }
+                document.fileURL = movedURL
+                document.revisionKey = RevisionStore.key(for: movedURL)
+                state.fileURL = movedURL
+                state.siblingState?.fileURL = movedURL
+                RecentFilesStore.shared.record(movedURL)
+            } catch {
+                state.operationError =
+                    "Couldn't rename \(oldURL.lastPathComponent): \(error.localizedDescription)"
+            }
         }
     }
 
@@ -570,90 +357,32 @@ extension CommandActions {
     /// clean batches go through immediately.
     static func requestCloseOtherTabs(except keepID: UUID, in session: EditorSession) {
         let victims = session.tabs.filter { $0.id != keepID && !$0.isPinned }
-        requestCloseTabs(victims, in: session, description: descriptor(for: victims.count, kind: .other))
+        requestCloseTabs(victims, in: session)
     }
 
     static func requestCloseTabsToRight(of pivotID: UUID, in session: EditorSession) {
         guard let pivot = session.tabs.firstIndex(where: { $0.id == pivotID }) else { return }
         let victims = session.tabs[(pivot + 1)...].filter { !$0.isPinned }
-        requestCloseTabs(Array(victims), in: session, description: descriptor(for: victims.count, kind: .right))
+        requestCloseTabs(Array(victims), in: session)
     }
 
     static func requestCloseAllTabs(in session: EditorSession) {
-        // Pinned tabs are exempt — matches the Safari semantics
-        // every other batch-close command in the app follows.
+        // Preserve pinned tabs, as with the other batch-close commands.
         let victims = session.tabs.filter { !$0.isPinned }
-        requestCloseTabs(victims, in: session, description: descriptor(for: victims.count, kind: .all))
+        requestCloseTabs(victims, in: session)
     }
 
-    private enum BatchKind { case other, right, all }
-
-    private static func descriptor(for count: Int, kind: BatchKind) -> String {
-        let plural = (count == 1 ? "tab" : "tabs")
-        switch kind {
-        case .other: return count == 1 ? "Close 1 other tab" : "Close \(count) other tabs"
-        case .right: return "Close \(count) \(plural) to the right"
-        case .all:   return count == 1 ? "Close 1 tab" : "Close all \(count) tabs"
-        }
-    }
-
-    private static func requestCloseTabs(_ victims: [TabModel], in session: EditorSession, description: String) {
+    private static func requestCloseTabs(_ victims: [TabModel], in session: EditorSession) {
         guard !victims.isEmpty else { return }
-        let dirty = victims.filter(shouldWarnBeforeClose)
-        if dirty.isEmpty {
+        if !victims.contains(where: \.needsCloseConfirmation) {
             for tab in victims { session.closeTab(tab.id) }
             return
         }
-        Self.context.presentation.pendingBatchClose = PendingBatchClose(
-            sessionID: ObjectIdentifier(session),
-            tabIDs: victims.map(\.id),
-            description: description,
-            dirtyCount: dirty.count
-        )
-    }
-
-    /// "Discard All" path — wipes scratch + draft for every dirty tab
-    /// so the bytes can't resurrect from the launcher or ⇧⌘T.
-    static func confirmBatchDiscard(_ pending: PendingBatchClose) {
-        defer { Self.context.presentation.pendingBatchClose = nil }
-        guard let session = resolveSession(for: pending) else { return }
-        for tabID in pending.tabIDs {
-            guard let tab = session.tabs.first(where: { $0.id == tabID }) else { continue }
-            tab.document.deleteScratchFile()
-            session.closeTab(tabID, disposition: .discard)
+        guard let review = session.requestClose else {
+            session.activeTab.state.operationError = "The window is not ready to close. Please try again."
+            return
         }
-    }
-
-    /// "Save All to Drafts" — autosave the live buffer for every
-    /// dirty tab (URL-backed gets a draft pinned to its source;
-    /// untitled goes to the recovery pool), then close everything
-    /// with `.archive` disposition so ⇧⌘T can resurrect them too.
-    static func confirmBatchSaveAsDrafts(_ pending: PendingBatchClose) {
-        guard let session = resolveSession(for: pending) else { return }
-        Task { @MainActor in
-            defer { Self.context.presentation.pendingBatchClose = nil }
-            do {
-                for tabID in pending.tabIDs {
-                    guard let tab = session.tabs.first(where: { $0.id == tabID }) else { continue }
-                    try await snapshotDraft(for: tab, endEditing: true)
-                    session.closeTab(tabID)
-                }
-            } catch {
-                Self.context.presentation.openErrorMessage =
-                    "Couldn't save all recovery drafts: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    static func cancelBatchClose() {
-        Self.context.presentation.pendingBatchClose = nil
-    }
-
-    /// Resolves the originating session for a PendingBatchClose,
-    /// matching by identity so the dialog hits the right window
-    /// even after focus shifts.
-    private static func resolveSession(for pending: PendingBatchClose) -> EditorSession? {
-        Self.context.scenes.allOpenSessions.first { ObjectIdentifier($0) == pending.sessionID }
+        review(.tabs(victims.map(\.id)))
     }
 
     /// Reopen the most-recently closed tab in the active session.

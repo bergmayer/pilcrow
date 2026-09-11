@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Bundles `EditorView`'s `.onChange` observers (encoding/lineEnding
-/// mirror, autosave debounce, live spell check toggle, tap-to-suggest
+/// mirror, recovery checkpoints, live spell check toggle, tap-to-suggest
 /// on misspelling entry) into one modifier. Same type-checker budget
 /// reason as the sibling *AlertModifier files — five `.onChange`
 /// closures inline in `body` pushed the chain past the compiler's

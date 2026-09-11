@@ -109,11 +109,11 @@ enum DocumentLocation {
             return joining([providerName] + rest)
         }
 
-        // 4. App's own Documents directory — show as "On My iPad".
+        // 4. App's own Documents directory — match the device's Files label.
         if let i = components.firstIndex(of: "Application"),
            let docsIdx = components.dropFirst(i).firstIndex(of: "Documents") {
             let rest = Array(components.dropFirst(docsIdx + 1))
-            return joining(["On My iPad"] + rest)
+            return joining([DeviceIdiom.isPhone ? "On My iPhone" : "On My iPad"] + rest)
         }
 
         // 5. Anything else — strip sandbox noise and join what's left.

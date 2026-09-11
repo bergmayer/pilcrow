@@ -15,8 +15,6 @@ final class PresentationState {
     weak var presentedSheetOwner: EditorState?
     var revertRequestCount: Int = 0
     var openErrorMessage: String?
-    var pendingClose: PendingClose?
-    var pendingBatchClose: PendingBatchClose?
     var sourceStaleCheck: SourceStaleCheck?
 
     func present(_ sheet: EditorSheet, owner: EditorState?) {
@@ -50,33 +48,4 @@ enum SourceStaleCheck: Identifiable {
             return n
         }
     }
-}
-
-/// The session id is captured so the dialog targets the right
-/// window even if focus shifts before the user taps a button.
-@MainActor
-struct PendingClose: Identifiable {
-    let id = UUID()
-    let sessionID: ObjectIdentifier
-    let tabID: UUID
-    let displayName: String
-    let isUntitled: Bool
-}
-
-/// "Close Other Tabs" / "Close Tabs to the Right" / "Close All Tabs"
-/// route through this when at least one of the tabs in the batch
-/// has unsaved changes. The user picks Discard All (drops drafts)
-/// or Save All to Drafts (keeps each tab's edits in the unsaved-
-/// drafts list so they're recoverable from the launcher). No per-
-/// tab Save-and-Close — the prompt is meant to be quick.
-@MainActor
-struct PendingBatchClose: Identifiable {
-    let id = UUID()
-    let sessionID: ObjectIdentifier
-    let tabIDs: [UUID]
-    /// "Close 4 other tabs", "Close 7 tabs to the right", "Close all 9 tabs"
-    let description: String
-    /// Number of tabs in `tabIDs` that are actually dirty — used in
-    /// the dialog message so the user sees the scope.
-    let dirtyCount: Int
 }

@@ -3,7 +3,7 @@ import UIKit
 
 extension CommandActions {
 
-    // MARK: - Reflow paragraph (BBEdit hard-wrap)
+    // MARK: - Reflow paragraph (hard wrap)
 
     /// Hard-wraps the selection or current paragraph.
     static func reflowParagraph(column: Int = 80) {
@@ -142,7 +142,7 @@ extension CommandActions {
         return ns.substring(with: r)
     }
 
-    // MARK: - Process Lines Containing (BBEdit)
+    // MARK: - Process Lines Containing
 
     enum ProcessLinesAction {
         case keepMatching

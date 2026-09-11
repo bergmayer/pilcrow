@@ -8,6 +8,7 @@ import SwiftUI
 /// separate outline sheet anymore.
 struct OutlineSidebar: View {
 
+    let document: PlainTextDocument
     @Bindable var state: EditorState
     @State private var query: String = ""
 
@@ -33,7 +34,7 @@ struct OutlineSidebar: View {
                 .font(.headline)
             Spacer()
             Button {
-                AppStateBus.shared.scenes.claimFocus(state: state)
+                AppStateBus.shared.scenes.claimFocus(preservingPaneOf: state)
                 CommandActions.toggleSidebar()
             } label: {
                 Image(systemName: "sidebar.left")
@@ -48,20 +49,21 @@ struct OutlineSidebar: View {
 
     @ViewBuilder
     private var content: some View {
-        let entries = OutlineBuilder.build()
+        let entries = OutlineBuilder.build(in: document.text as NSString)
         let filtered = filter(entries)
         if entries.isEmpty {
             ContentUnavailableView(
                 "No headings",
                 systemImage: "list.bullet.indent",
-                description: Text("Add Markdown headings (# Title) or fold-marker comments to populate the outline.")
+                description: Text("Add Markdown headings (# Title) to populate the outline.")
             )
-        } else if filtered.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
             VStack(spacing: 0) {
                 searchField
                 Divider()
+                if filtered.isEmpty {
+                    ContentUnavailableView.search(text: query)
+                }
                 List {
                     ForEach(filtered) { entry in
                         Button {
@@ -69,7 +71,7 @@ struct OutlineSidebar: View {
                         } label: {
                             HStack(spacing: 6) {
                                 Text(String(repeating: "  ", count: max(0, entry.level - 1)))
-                                Text(entry.text)
+                                Text(entry.title)
                                     .foregroundStyle(.primary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -110,15 +112,14 @@ struct OutlineSidebar: View {
         .background(.thinMaterial)
     }
 
-    private func filter(_ entries: [OutlineBuilder.Heading]) -> [OutlineBuilder.Heading] {
+    private func filter(_ entries: [OutlineEntry]) -> [OutlineEntry] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return entries }
-        return entries.filter { $0.text.lowercased().contains(q) }
+        return entries.filter { $0.title.lowercased().contains(q) }
     }
 
-    private func jump(to heading: OutlineBuilder.Heading) {
+    private func jump(to heading: OutlineEntry) {
         guard let textView = state.textView else { return }
-        textView.setSelection(NSRange(location: heading.lineStart, length: 0))
-        textView.scrollSelectionToVisible()
+        textView.goToLine(heading.row + 1)
     }
 }

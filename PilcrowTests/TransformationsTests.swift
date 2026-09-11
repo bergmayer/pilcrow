@@ -142,6 +142,18 @@ final class TransformationsTests: XCTestCase {
         XCTAssertEqual(Transformations.interpretEscapeSequences(#"a\nb\tc\x41é"#), "a\nb\tcAé")
     }
 
+    func test_interpretEscapeSequences_preservesMalformedEscapesAndUnicode() {
+        let cases = [
+            (#"\q"#, #"\q"#), (#"\uD800"#, #"\uD800"#),
+            (#"\u12z4"#, #"\u12z4"#), (#"\x"#, #"\x"#),
+            (#"\x4Z"#, "\u{4}Z"), (#"😀\u00E9"#, "😀é"),
+            (#"\0\\\"\'"#, "\0\\\"'"), ("trailing\\", "trailing\\")
+        ]
+        for (input, expected) in cases {
+            XCTAssertEqual(Transformations.interpretEscapeSequences(input), expected)
+        }
+    }
+
     func test_interpretEscapeSequences_requiresExactlyFourHexDigitsForUnicode() {
         XCTAssertEqual(Transformations.interpretEscapeSequences("\\u0041"), "A")
         // Short \u escapes pass through rather than decoding greedily.

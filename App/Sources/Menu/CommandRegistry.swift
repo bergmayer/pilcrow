@@ -105,24 +105,40 @@ enum CommandRegistry {
                       action: CommandActions.newWindow,
                       isEnabled: { true })
             )
+            commands.append(
+                .init(id: "closeWindow", title: "Close Window", category: .file, shortcutHint: "⇧⌘W",
+                      synonyms: ["close this window"], action: { CommandActions.closeWindow() })
+            )
+            commands.append(
+                .init(id: "saveAllAndCloseWindow", title: "Save All and Close Window", category: .file,
+                      synonyms: ["save all", "save every document", "save and close"],
+                      description: "Save each changed document, then close this window. Canceling any save keeps it open.",
+                      action: { CommandActions.saveAllAndCloseWindow() })
+            )
         }
 
         // MARK: File / Window
 
         commands += [
-            .init(id: "newTab",     title: "New",                            category: .file, shortcutHint: "⌘T",   synonyms: ["new document", "new tab", "blank document", "spawn tab", "open empty tab"], action: CommandActions.newTab, isEnabled: { AppStateBus.shared.scenes.currentSession != nil }),
+            .init(id: "newTab",     title: "New Tab",                        category: .file, shortcutHint: "⌘T",   synonyms: ["new document", "new tab", "blank document", "spawn tab", "open empty tab"], action: CommandActions.newTab, isEnabled: { AppStateBus.shared.scenes.currentSession != nil }),
             .init(id: "newTemplate", title: "New from Template…",             category: .file, synonyms: ["template", "new template document", "template picker"], action: CommandActions.newFromTemplate, isEnabled: { AppStateBus.shared.scenes.currentSession != nil }),
             .init(id: "showTabs",   title: "Show All Tabs",                  category: .file, shortcutHint: "⇧⌘\\", synonyms: ["tab switcher", "tab overview", "expose tabs", "all tabs"], action: CommandActions.showTabSwitcher, isEnabled: { true }),
             .init(id: "reopenTab",  title: "Reopen Last Closed Tab",         category: .file, shortcutHint: "⇧⌘T",  synonyms: ["restore tab", "undo close tab", "recently closed"], action: CommandActions.reopenLastClosedTab, isEnabled: { true }),
-            .init(id: "drafts",     title: "Recoverable Work…",            category: .file, synonyms: ["recover work", "recover drafts", "restore window", "drafts", "unsaved", "autosaved drafts", "draft recovery"], action: CommandActions.presentDraftsRecovery, isEnabled: { true }),
             .init(id: "closeTab",   title: "Close Tab",                      category: .file, shortcutHint: "⌘W",   synonyms: ["close current tab"], action: CommandActions.closeActiveTab),
             .init(id: "pinTab",     title: "Pin / Unpin Tab",                category: .file, synonyms: ["pin", "unpin", "favourite tab"], action: CommandActions.pinCurrentTab),
             .init(id: "closeOthers", title: "Close Other Tabs",              category: .file, synonyms: ["close all other tabs"], action: CommandActions.closeOtherTabs),
+            .init(id: "closeAllTabs", title: "Close All Tabs", category: .file, synonyms: ["close every tab"], action: {
+                guard let session = CommandActions.session else { return }
+                CommandActions.requestCloseAllTabs(in: session)
+            }),
             .init(id: "closeRight", title: "Close Tabs to the Right",        category: .file, synonyms: ["close trailing tabs"], action: CommandActions.closeTabsToRight),
             .init(id: "nextTab",    title: "Next Tab",                       category: .file, shortcutHint: "⇧⌘]", synonyms: ["select next tab", "tab forward"], action: CommandActions.nextTab),
             .init(id: "prevTab",    title: "Previous Tab",                   category: .file, shortcutHint: "⇧⌘[", synonyms: ["select previous tab", "tab back"], action: CommandActions.previousTab),
             .init(id: "openInTab",  title: "Open File in New Tab…",          category: .file, shortcutHint: DeviceIdiom.supportsMultipleWindows ? nil : "⌘O", synonyms: ["open document in new tab", "open file", "load file", "force tab"], action: CommandActions.presentFileBrowserInNewTab, isEnabled: { true }),
             .init(id: "openInWin",  title: "Open File in New Window…",       category: .file, shortcutHint: "⌘O",   synonyms: ["open document in new window", "open file", "load file", "force window"], action: CommandActions.presentFileBrowserInNewWindow, isEnabled: { DeviceIdiom.supportsMultipleWindows }),
+            .init(id: "shareText", title: "Share Text…", category: .file, action: CommandActions.shareText),
+            .init(id: "shareFile", title: "Share File…", category: .file, action: CommandActions.shareFile),
+            .init(id: "print", title: "Print…", category: .file, shortcutHint: "⌘⇧P", action: CommandActions.printDocument),
             .init(id: "saveFile",   title: "Save",                           category: .file, shortcutHint: "⌘S",   synonyms: ["write file"],                       action: CommandActions.saveFile),
             .init(id: "saveAs",     title: "Save As…",                       category: .file, shortcutHint: "⇧⌘S",  synonyms: ["save copy", "duplicate file"],     action: CommandActions.saveFileAs),
             .init(id: "revert",     title: "Revert to Saved",                category: .file, synonyms: ["reload from disk", "discard changes"], action: CommandActions.revertToSaved),
@@ -135,6 +151,8 @@ enum CommandRegistry {
 
         commands += [
             .init(id: "find",       title: "Find…",                          category: .search, shortcutHint: "⌘F",   synonyms: ["search"], action: CommandActions.presentFindNavigator),
+            .init(id: "findRepl", title: "Find & Replace…", category: .search,
+                  synonyms: ["replace text", "replace all"], action: CommandActions.presentFindAndReplace),
             .init(id: "findFast",   title: "Find Incrementally",             category: .search, shortcutHint: "⌥⌘F",  synonyms: ["quick find", "find bar", "incremental search", "live search"], action: CommandActions.presentSystemFindBar),
             .init(id: "multiFile",  title: "Multi-File Search…",             category: .search, shortcutHint: "⇧⌘F",  synonyms: ["search in folder", "grep folder", "find in files", "search across files"], action: CommandActions.presentMultiFileSearch, isEnabled: { true }),
             .init(id: "findFirst",  title: "Find First",                     category: .search, synonyms: ["first match", "jump to first match", "find from start"], action: CommandActions.findFirst),
@@ -150,6 +168,19 @@ enum CommandRegistry {
             .init(id: "posFwd",     title: "Forward",                        category: .navigate, shortcutHint: "⌃⌘→", action: CommandActions.positionForward)
         ]
 
+        commands += [
+            .init(id: "undo", title: "Undo", category: .edit, shortcutHint: "⌘Z", action: CommandActions.undo,
+                  isEnabled: { CommandActions.actions?.undoManager?.canUndo == true }),
+            .init(id: "redo", title: "Redo", category: .edit, shortcutHint: "⇧⌘Z", action: CommandActions.redo,
+                  isEnabled: { CommandActions.actions?.undoManager?.canRedo == true }),
+            .init(id: "cut", title: "Cut", category: .edit, shortcutHint: "⌘X", action: CommandActions.cutSelection,
+                  isEnabled: { (CommandActions.actions?.selectedRange.length ?? 0) > 0 }),
+            .init(id: "copy", title: "Copy", category: .edit, shortcutHint: "⌘C", action: CommandActions.copySelection,
+                  isEnabled: { (CommandActions.actions?.selectedRange.length ?? 0) > 0 }),
+            .init(id: "paste", title: "Paste", category: .edit, shortcutHint: "⌘V", action: CommandActions.paste),
+            .init(id: "selectAll", title: "Select All", category: .selection, shortcutHint: "⌘A", action: { CommandActions.actions?.selectAll() })
+        ]
+
         // MARK: Selection / line ops
 
         commands += [
@@ -161,12 +192,23 @@ enum CommandRegistry {
             .init(id: "delEOL",         title: "Delete to End of Line",      category: .edit, shortcutHint: "⌃K", synonyms: ["kill line", "erase to end"], action: CommandActions.deleteToEndOfLine),
             .init(id: "delWordBack",    title: "Delete Word Backward",       category: .edit, shortcutHint: "⌥⌫", synonyms: ["erase word", "backward kill word"], action: CommandActions.deleteWordBackward),
             .init(id: "delWordFwd",     title: "Delete Word Forward",        category: .edit, shortcutHint: "⌥⌦", synonyms: ["forward kill word"], action: CommandActions.deleteWordForward),
+            .init(id: "comment", title: "Toggle Line Comment", category: .edit, shortcutHint: "⌘/",
+                  action: CommandActions.toggleLineComment, isEnabled: {
+                      guard let state = CommandActions.state, state.textView != nil else { return false }
+                      return !LanguageRegistry.lineComment(for: state.languageIdentifier).isEmpty
+                  }),
             .init(id: "indent",     title: "Indent Selection",    category: .edit,      shortcutHint: "⌘]",  synonyms: ["shift right", "tab"], action: CommandActions.indentSelection),
             .init(id: "outdent",    title: "Outdent Selection",   category: .edit,      shortcutHint: "⌘[",  synonyms: ["shift left", "unindent", "dedent"], action: CommandActions.outdentSelection),
             .init(id: "mdListDash",   title: "Convert to Bullet List (- )", category: .format, synonyms: ["markdown list dash", "dash list", "to bullets"], action: CommandActions.convertToBulletListDash),
             .init(id: "mdListStar",   title: "Convert to Bullet List (* )", category: .format, synonyms: ["markdown list star", "asterisk list"],          action: CommandActions.convertToBulletListStar),
             .init(id: "mdListNum",    title: "Convert to Numbered List",    category: .format, synonyms: ["markdown ordered list", "numbered list", "1."], action: CommandActions.convertToNumberedList),
             .init(id: "outline",      title: "Show Outline",                 category: .view, shortcutHint: "⌃⌘S", synonyms: ["sidebar", "show sidebar", "toggle sidebar", "headings", "toc", "table of contents", "structure", "outline sidebar", "navigation panel"], action: CommandActions.showOutline),
+            .init(id: "wordCount", title: "Word Count…", category: .inspect,
+                  synonyms: ["statistics", "character count", "selection count"], action: {
+                      let owner = CommandActions.session?.activeTab.state ?? CommandActions.state
+                      owner?.inspectorTab = .file
+                      owner?.inspectorOpen = true
+                  }),
             .init(id: "fileInfo",     title: "Show File Information",        category: .view, shortcutHint: "⌥⌘I", synonyms: ["file info", "inspector", "metadata", "details", "outline panel"], action: CommandActions.toggleInspector),
             .init(id: "mdPreview",    title: "Markdown Preview…",           category: .markdown, shortcutHint: "⌥⌘P", synonyms: ["render", "html preview"], action: CommandActions.presentMarkdownPreview),
             .init(id: "reflow",       title: "Reflow Paragraph (80 cols)",  category: .format,   synonyms: ["hard wrap", "rewrap", "paragraph fill", "fill"], action: { CommandActions.reflowParagraph(column: 80) }),
@@ -277,7 +319,7 @@ enum CommandRegistry {
         commands += [
             .init(id: "copyAll",    title: "Copy All",                  category: .edit,
                   synonyms: ["copy document", "copy entire document", "copy whole file", "clipboard"],
-                  action: CommandActions.copyAll,
+                  action: { CommandActions.copyAll() },
                   isEnabled: { AppStateBus.shared.scenes.currentSession?.activeTab.kind == .editor }),
             .init(id: "snipSave",   title: "Save Selection as Snippet", category: .snippets,
                   synonyms: ["add snippet", "create snippet"],

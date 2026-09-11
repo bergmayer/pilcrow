@@ -21,7 +21,6 @@ enum EditorSheet: Identifiable {
     case insertLoremIpsum
     case snippetsManager
     case clipboardHistory
-    case draftsRecovery
     case templatePicker
     case tabSwitcher
     case processLines
@@ -58,7 +57,6 @@ enum EditorSheet: Identifiable {
         case .insertLoremIpsum:      return "lipsum"
         case .snippetsManager:       return "snippetsManager"
         case .clipboardHistory:      return "clipboardHistory"
-        case .draftsRecovery:        return "draftsRecovery"
         case .templatePicker:        return "templatePicker"
         case .tabSwitcher:           return "tabSwitcher"
         case .processLines:          return "processLines"

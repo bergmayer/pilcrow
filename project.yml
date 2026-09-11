@@ -8,7 +8,7 @@ name: Pilcrow
 options:
   bundleIdPrefix: com.palefire
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "27.0"
   developmentLanguage: en
   createIntermediateGroups: true
 
@@ -42,7 +42,10 @@ targets:
         product: PilcrowSyntax
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.palefire.pilcrow
+        # Override only the app identity when updating an older installation.
+        # A global PRODUCT_BUNDLE_IDENTIFIER override also corrupts package resource identities.
+        PILCROW_APP_BUNDLE_IDENTIFIER: com.palefire.pilcrow
+        PRODUCT_BUNDLE_IDENTIFIER: $(PILCROW_APP_BUNDLE_IDENTIFIER)
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "6.0"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -69,18 +72,34 @@ targets:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: "YES"
 
+  PilcrowUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: PilcrowUITests
+    dependencies:
+      - target: Pilcrow
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.palefire.pilcrow.uitests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_TARGET_NAME: Pilcrow
+
 schemes:
   Pilcrow:
     build:
       targets:
         Pilcrow: all
         PilcrowTests: [test]
+        PilcrowUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
         - PilcrowTests
+        - PilcrowUITests
     profile:
       config: Release
     analyze:

@@ -13,11 +13,12 @@ struct EditorCommands: Commands {
     @State private var snippetsStore = SnippetsStore.shared
     @State private var jsTransformStore = JSTransformStore.shared
     @State private var recentFilesStore = RecentFilesStore.shared
-    @FocusedValue(\.presentEditorSheet) private var focusedPresenter: SheetPresenter?
     @FocusedValue(\.focusedSession) private var focusedSession: EditorSession?
 
     private var editorState: EditorState? {
-        focusedSession?.activeTab.state ?? bus.scenes.currentEditor
+        guard let focusedSession else { return bus.scenes.currentEditor }
+        return focusedSession.activeTab.owns(bus.scenes.currentEditor)
+            ? bus.scenes.currentEditor : focusedSession.activeTab.state
     }
     private var isEnabled: Bool { editorState != nil }
 
@@ -31,11 +32,7 @@ struct EditorCommands: Commands {
 
     private func presentSheet(_ sheet: EditorSheet) {
         claimFocus()
-        if let focusedPresenter {
-            focusedPresenter(sheet)
-        } else {
-            bus.presentation.present(sheet, owner: editorState)
-        }
+        bus.presentation.present(sheet, owner: editorState)
     }
 
     private func focused(_ action: @escaping @MainActor () -> Void) -> () -> Void {
@@ -85,7 +82,7 @@ struct EditorCommands: Commands {
 
         CommandGroup(replacing: .newItem) {
             if DeviceIdiom.supportsMultipleWindows {
-                Button(action: { openWindow(id: SceneID.editor.rawValue) }) {
+                Button(action: { openWindow(id: SceneID.editor.rawValue, value: EditorRoute.newDocument()) }) {
                     Label("New Window", systemImage: "macwindow.badge.plus")
                 }
                 .keyboardShortcut(AppShortcut.newWindow)
@@ -97,7 +94,7 @@ struct EditorCommands: Commands {
                 if let session = focusedSession ?? AppStateBus.shared.scenes.currentSession {
                     session.newTab()
                 } else {
-                    openWindow(id: SceneID.editor.rawValue)
+                    openWindow(id: SceneID.editor.rawValue, value: EditorRoute.newDocument())
                 }
             }) {
                 Label("New Tab", systemImage: "rectangle.stack.badge.plus")
@@ -127,6 +124,12 @@ struct EditorCommands: Commands {
             }
         }
         CommandGroup(replacing: .saveItem) {
+            Button("Share Text…", action: focused(CommandActions.shareText)).disabled(!isEnabled)
+            Button("Share File…", action: focused(CommandActions.shareFile)).disabled(!isEnabled)
+            Button("Print…", action: focused(CommandActions.printDocument))
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+                .disabled(!isEnabled)
+            Divider()
             Button(action: focused(CommandActions.saveFile)) {
                 Label("Save", systemImage: "tray.and.arrow.down")
             }
@@ -147,9 +150,6 @@ struct EditorCommands: Commands {
             }
             .keyboardShortcut(AppShortcut.showRevisions)
             .disabled(!isEnabled)
-            Button(action: { presentSheet(.draftsRecovery) }) {
-                Label("Recoverable Work…", systemImage: "tray.full")
-            }
             Divider()
             Button(action: focused(CommandActions.speakSelection)) {
                 Label("Speak Selection", systemImage: "speaker.wave.2")
@@ -417,10 +417,15 @@ struct EditorCommands: Commands {
                 Label("Close Tab", systemImage: "xmark.square")
             }
             .keyboardShortcut(AppShortcut.closeTab)
-            Button(action: focused { CommandActions.closeWindow() }) {
-                Label("Close Window", systemImage: "macwindow")
+            if DeviceIdiom.supportsMultipleWindows {
+                Button(action: focused { CommandActions.closeWindow() }) {
+                    Label("Close Window", systemImage: "macwindow")
+                }
+                .keyboardShortcut(AppShortcut.closeWindow)
+                Button(action: focused { CommandActions.saveAllAndCloseWindow() }) {
+                    Label("Save All and Close Window", systemImage: "square.and.arrow.down")
+                }
             }
-            .keyboardShortcut(AppShortcut.closeWindow)
             Button(action: focused(CommandActions.reopenLastClosedTab)) {
                 Label("Reopen Last Closed Tab", systemImage: "arrow.uturn.backward.square")
             }
@@ -484,6 +489,9 @@ struct EditorCommands: Commands {
     @ViewBuilder
     private var formatSubmenuContent: some View {
         Group {
+            Button("Toggle Line Comment", action: focused(CommandActions.toggleLineComment))
+                .keyboardShortcut("/", modifiers: .command)
+                .disabled(LanguageRegistry.lineComment(for: editorState?.languageIdentifier ?? .plain).isEmpty)
             Menu("File Encoding")        { encodingMenuItems }
             Menu("Reopen with Encoding") { reopenWithEncodingMenuItems }
             Menu("Line Endings")         { lineEndingMenuItems }
@@ -701,6 +709,8 @@ struct EditorCommands: Commands {
             }
             .keyboardShortcut(AppShortcut.find)
             .disabled(!isEnabled)
+            Button("Find & Replace…", action: focused(CommandActions.presentFindAndReplace))
+                .disabled(!isEnabled)
             Button("Multi-File Search…", action: focused(CommandActions.presentMultiFileSearch))
                 .keyboardShortcut(AppShortcut.multiFileSearch)
         }

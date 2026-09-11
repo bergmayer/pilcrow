@@ -21,9 +21,9 @@ extension Animation {
 /// literals out of the call sites and makes timing knobs adjustable
 /// in one place.
 enum Timing {
-    /// Debounce window before the editor commits a buffer to disk
-    /// after typing stops.
-    static let autoSaveDebounce: Duration = .milliseconds(800)
+    /// Delay from the first uncheckpointed edit. Further typing must
+    /// not reset this timer and indefinitely postpone crash recovery.
+    static let autoSaveInterval: Duration = .milliseconds(800)
     /// Debounce window before the change-history gutter overlay
     /// re-splits the buffer to recompute its colored bars. Per-
     /// keystroke splits froze typing on multi-MB files; debouncing

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// BBEdit-style Zap Gremlins dialog.
+/// Choose unwanted character categories to remove or replace.
 ///
 /// Lets the user pick which character categories count as gremlins
 /// (ASCII control, invisible Unicode, all non-ASCII) and what to

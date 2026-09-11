@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// BBEdit-style line filter — keep / delete / copy lines that match
+/// Line filter — keep / delete / copy lines that match
 /// a pattern.
 struct ProcessLinesSheet: View {
 

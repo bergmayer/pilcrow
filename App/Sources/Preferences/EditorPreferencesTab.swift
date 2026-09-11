@@ -102,6 +102,46 @@ struct EditorPreferencesTab: View {
                 }
             }
 
+            if !DeviceIdiom.isPhone {
+                Section {
+                    Picker("Document Tabs", selection: $prefs.documentTabAppearance) {
+                        ForEach(DocumentTabAppearance.allCases) { appearance in
+                            Text(appearance.label).tag(appearance)
+                        }
+                    }
+                    .accessibilityIdentifier("document-tab-appearance")
+                } header: {
+                    Text("Window Layout")
+                } footer: {
+                    Text(
+                        "Show open documents across the top or in a list on the left. In narrow windows, the Documents button opens the list."
+                    )
+                }
+            }
+
+            Section {
+                if DeviceIdiom.supportsMultipleWindows {
+                    Picker("New Windows Open With", selection: $prefs.newWindowContent) {
+                        ForEach(NewDocumentContent.allCases) { content in
+                            Text(content.label).tag(content)
+                        }
+                    }
+                    .accessibilityIdentifier("new-window-content")
+                }
+                Picker("New Tabs Open With", selection: $prefs.newTabContent) {
+                    ForEach(NewDocumentContent.allCases) { content in
+                        Text(content.label).tag(content)
+                    }
+                }
+                .accessibilityIdentifier("new-tab-content")
+            } header: {
+                Text("New Windows and Tabs")
+            } footer: {
+                Text(
+                    "Choose a start page with document creation options or begin writing in a blank document. Restored documents keep their contents."
+                )
+            }
+
             Section("Display") {
                 Picker("Font", selection: $prefs.fontName) {
                     // Monospaced first — typical code-editor pick.

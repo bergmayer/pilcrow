@@ -7,7 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		76EE02745AEFD3AF5866B8D6 /* BasicEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD770461DFC5BBEBC9E9BAE8 /* BasicEditingTests.swift */; };
+		E261519BC0C84F230D2A3E47 /* JavaScriptWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6882F194A5EF429E42998667 /* JavaScriptWorker.swift */; };
+		B1CF1A68F56AE1077EA13270 /* DocumentSharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3719B1DA2700D0B335469511 /* DocumentSharing.swift */; };
+		758FEC98405FECA7F01B5F8B /* SourceFileObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C5E0506C7550439F0F40BDB /* SourceFileObservation.swift */; };
+		4F73420777015E74DD8CA135 /* EditorRestoration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6E74C74445C082035E42B7 /* EditorRestoration.swift */; };
 		B2000001 /* PilcrowApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000001 /* PilcrowApp.swift */; };
+		B2000098 /* CoordinatedFileAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000098 /* CoordinatedFileAccess.swift */; };
 		B2000002 /* PlainTextDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002 /* PlainTextDocument.swift */; };
 		B2000003 /* EditorState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000003 /* EditorState.swift */; };
 		B2000004 /* EditorTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000004 /* EditorTextView.swift */; };
@@ -45,7 +51,6 @@
 		B2000025 /* ZapGremlinsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000025 /* ZapGremlinsSheet.swift */; };
 		B2000026 /* RevisionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000026 /* RevisionStore.swift */; };
 		B2000027 /* RevisionsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000027 /* RevisionsSheet.swift */; };
-		B2000028 /* DocumentPickerBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000028 /* DocumentPickerBridge.swift */; };
 		B2000029 /* FileBrowserScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000029 /* FileBrowserScene.swift */; };
 		B200002A /* Timing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100002A /* Timing.swift */; };
 		B200002B /* TextFileWrapperProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100002B /* TextFileWrapperProxy.swift */; };
@@ -78,7 +83,7 @@
 		B200004E /* SceneRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100004E /* SceneRouter.swift */; };
 		B200004F /* PickerIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100004F /* PickerIntents.swift */; };
 		B2000050 /* PresentationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000050 /* PresentationState.swift */; };
-		B2000051 /* PendingURLs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000051 /* PendingURLs.swift */; };
+		B2000051 /* DocumentDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000051 /* DocumentDestination.swift */; };
 		B2000052 /* TabModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000052 /* TabModel.swift */; };
 		B2000053 /* EditorSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000053 /* EditorSession.swift */; };
 		B2000054 /* ClosedTabsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000054 /* ClosedTabsStore.swift */; };
@@ -99,7 +104,6 @@
 		B2000064 /* TemplatesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000064 /* TemplatesStore.swift */; };
 		B2000065 /* NewDocumentLauncherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000065 /* NewDocumentLauncherView.swift */; };
 		B2000066 /* StaleSourceAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000066 /* StaleSourceAlertModifier.swift */; };
-		B2000068 /* BatchCloseAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000068 /* BatchCloseAlertModifier.swift */; };
 		B2000069 /* TabOverviewContextMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000069 /* TabOverviewContextMenu.swift */; };
 		B200006A /* EditorStatusBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006A /* EditorStatusBar.swift */; };
 		B200006B /* EditorTextViewCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100006B /* EditorTextViewCoordinator.swift */; };
@@ -114,8 +118,8 @@
 		B2000094 /* RevisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000094 /* RevisionStoreTests.swift */; };
 		B2000095 /* SessionsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000095 /* SessionsStoreTests.swift */; };
 		B2000096 /* PlainTextDocumentEncodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000096 /* PlainTextDocumentEncodeTests.swift */; };
+		B2000097 /* EngineeringRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000097 /* EngineeringRegressionTests.swift */; };
 		B200009A /* OpenErrorAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009A /* OpenErrorAlertModifier.swift */; };
-		B200009B /* PendingCloseAlertModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009B /* PendingCloseAlertModifier.swift */; };
 		B200009C /* EditorObserversModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009C /* EditorObserversModifier.swift */; };
 		B200009D /* PhoneEditorToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100009D /* PhoneEditorToolbar.swift */; };
 		B2010001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B1010001 /* Assets.xcassets */; };
@@ -125,6 +129,7 @@
 		B2020004 /* CharacterInfo in Frameworks */ = {isa = PBXBuildFile; productRef = B4000004 /* CharacterInfo */; };
 		B2020005 /* EditorEngine in Frameworks */ = {isa = PBXBuildFile; productRef = B4000005 /* EditorEngine */; };
 		B2020006 /* PilcrowSyntax in Frameworks */ = {isa = PBXBuildFile; productRef = B4000006 /* PilcrowSyntax */; };
+		C1000001 /* KeyboardLayoutUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1000002; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -138,9 +143,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		DD770461DFC5BBEBC9E9BAE8 /* BasicEditingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PilcrowTests/BasicEditingTests.swift"; sourceTree = SOURCE_ROOT; };
+		6882F194A5EF429E42998667 /* JavaScriptWorker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Sources/Features/JavaScriptWorker.swift"; sourceTree = SOURCE_ROOT; };
+		3719B1DA2700D0B335469511 /* DocumentSharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Sources/Features/DocumentSharing.swift"; sourceTree = SOURCE_ROOT; };
+		6C5E0506C7550439F0F40BDB /* SourceFileObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Sources/Documents/SourceFileObservation.swift"; sourceTree = SOURCE_ROOT; };
+		4F6E74C74445C082035E42B7 /* EditorRestoration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Sources/Editor/EditorRestoration.swift"; sourceTree = SOURCE_ROOT; };
 		31492A02300A4AEC00D4BAE6 /* Pilcrow.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = Pilcrow.xcodeproj; sourceTree = SOURCE_ROOT; };
 		B1000000 /* Pilcrow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pilcrow.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B1000001 /* PilcrowApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PilcrowApp.swift; sourceTree = "<group>"; };
+		B1000098 /* CoordinatedFileAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoordinatedFileAccess.swift; sourceTree = "<group>"; };
 		B1000002 /* PlainTextDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlainTextDocument.swift; sourceTree = "<group>"; };
 		B1000003 /* EditorState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorState.swift; sourceTree = "<group>"; };
 		B1000004 /* EditorTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTextView.swift; sourceTree = "<group>"; };
@@ -178,7 +189,6 @@
 		B1000025 /* ZapGremlinsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZapGremlinsSheet.swift; sourceTree = "<group>"; };
 		B1000026 /* RevisionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionStore.swift; sourceTree = "<group>"; };
 		B1000027 /* RevisionsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionsSheet.swift; sourceTree = "<group>"; };
-		B1000028 /* DocumentPickerBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentPickerBridge.swift; sourceTree = "<group>"; };
 		B1000029 /* FileBrowserScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserScene.swift; sourceTree = "<group>"; };
 		B100002A /* Timing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Timing.swift; sourceTree = "<group>"; };
 		B100002B /* TextFileWrapperProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextFileWrapperProxy.swift; sourceTree = "<group>"; };
@@ -211,7 +221,7 @@
 		B100004E /* SceneRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneRouter.swift; sourceTree = "<group>"; };
 		B100004F /* PickerIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PickerIntents.swift; sourceTree = "<group>"; };
 		B1000050 /* PresentationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentationState.swift; sourceTree = "<group>"; };
-		B1000051 /* PendingURLs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingURLs.swift; sourceTree = "<group>"; };
+		B1000051 /* DocumentDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentDestination.swift; sourceTree = "<group>"; };
 		B1000052 /* TabModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabModel.swift; sourceTree = "<group>"; };
 		B1000053 /* EditorSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorSession.swift; sourceTree = "<group>"; };
 		B1000054 /* ClosedTabsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClosedTabsStore.swift; sourceTree = "<group>"; };
@@ -232,7 +242,6 @@
 		B1000064 /* TemplatesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplatesStore.swift; sourceTree = "<group>"; };
 		B1000065 /* NewDocumentLauncherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewDocumentLauncherView.swift; sourceTree = "<group>"; };
 		B1000066 /* StaleSourceAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaleSourceAlertModifier.swift; sourceTree = "<group>"; };
-		B1000068 /* BatchCloseAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchCloseAlertModifier.swift; sourceTree = "<group>"; };
 		B1000069 /* TabOverviewContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabOverviewContextMenu.swift; sourceTree = "<group>"; };
 		B100006A /* EditorStatusBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorStatusBar.swift; sourceTree = "<group>"; };
 		B100006B /* EditorTextViewCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTextViewCoordinator.swift; sourceTree = "<group>"; };
@@ -247,14 +256,16 @@
 		B1000094 /* RevisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionStoreTests.swift; sourceTree = "<group>"; };
 		B1000095 /* SessionsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionsStoreTests.swift; sourceTree = "<group>"; };
 		B1000096 /* PlainTextDocumentEncodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlainTextDocumentEncodeTests.swift; sourceTree = "<group>"; };
+		B1000097 /* EngineeringRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineeringRegressionTests.swift; sourceTree = "<group>"; };
 		B100009A /* OpenErrorAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenErrorAlertModifier.swift; sourceTree = "<group>"; };
-		B100009B /* PendingCloseAlertModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingCloseAlertModifier.swift; sourceTree = "<group>"; };
 		B100009C /* EditorObserversModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorObserversModifier.swift; sourceTree = "<group>"; };
 		B100009D /* PhoneEditorToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneEditorToolbar.swift; sourceTree = "<group>"; };
 		B1010001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B1010002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B1010004 /* PilcrowTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PilcrowTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B1020001 /* EditorKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = EditorKit; path = Packages/EditorKit; sourceTree = "<group>"; };
+		C1000002 /* KeyboardLayoutUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PilcrowUITests/KeyboardLayoutUITests.swift; sourceTree = SOURCE_ROOT; };
+		C1000003 /* PilcrowUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = PilcrowUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -278,6 +289,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -293,6 +305,7 @@
 				B5000010 /* App */,
 				B5000020 /* Packages */,
 				B5000022 /* PilcrowTests */,
+				C1000002 /* KeyboardLayoutUITests.swift */,
 				B5000030 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -342,9 +355,13 @@
 			isa = PBXGroup;
 			children = (
 				B1000002 /* PlainTextDocument.swift */,
+				B1000098 /* CoordinatedFileAccess.swift */,
+				6882F194A5EF429E42998667 /* JavaScriptWorker.swift */,
+				3719B1DA2700D0B335469511 /* DocumentSharing.swift */,
+				6C5E0506C7550439F0F40BDB /* SourceFileObservation.swift */,
+				4F6E74C74445C082035E42B7 /* EditorRestoration.swift */,
 				B100001B /* RecentFilesStore.swift */,
 				B1000026 /* RevisionStore.swift */,
-				B1000028 /* DocumentPickerBridge.swift */,
 				B100002B /* TextFileWrapperProxy.swift */,
 				B100004A /* SessionsStore.swift */,
 				B1000054 /* ClosedTabsStore.swift */,
@@ -379,10 +396,8 @@
 				B1000059 /* ChangeHistoryGutterOverlay.swift */,
 				B1000066 /* StaleSourceAlertModifier.swift */,
 				B100009A /* OpenErrorAlertModifier.swift */,
-				B100009B /* PendingCloseAlertModifier.swift */,
 				B100009C /* EditorObserversModifier.swift */,
 				B100009D /* PhoneEditorToolbar.swift */,
-				B1000068 /* BatchCloseAlertModifier.swift */,
 				B1000069 /* TabOverviewContextMenu.swift */,
 				B100006A /* EditorStatusBar.swift */,
 			);
@@ -490,7 +505,7 @@
 				B1000013 /* AppStateBus.swift */,
 				B100004E /* SceneRouter.swift */,
 				B1000050 /* PresentationState.swift */,
-				B1000051 /* PendingURLs.swift */,
+				B1000051 /* DocumentDestination.swift */,
 				B100004F /* PickerIntents.swift */,
 				B1000031 /* FocusedSceneValues.swift */,
 				B100004D /* FindState.swift */,
@@ -506,7 +521,9 @@
 				B1000094 /* RevisionStoreTests.swift */,
 				B1000095 /* SessionsStoreTests.swift */,
 				B1000096 /* PlainTextDocumentEncodeTests.swift */,
+				B1000097 /* EngineeringRegressionTests.swift */,
 				B1000090 /* TransformationsTests.swift */,
+				DD770461DFC5BBEBC9E9BAE8 /* BasicEditingTests.swift */,
 				B1000091 /* FuzzyMatcherTests.swift */,
 			);
 			path = PilcrowTests;
@@ -517,6 +534,7 @@
 			children = (
 				B1000000 /* Pilcrow.app */,
 				B1010004 /* PilcrowTests.xctest */,
+				C1000003 /* PilcrowUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -567,6 +585,17 @@
 			productReference = B1010004 /* PilcrowTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		C1000004 /* PilcrowUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C1000005;
+			buildPhases = (C1000006, C1000007, C1000008);
+			buildRules = ();
+			dependencies = (BB000001);
+			name = PilcrowUITests;
+			productName = PilcrowUITests;
+			productReference = C1000003;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -606,6 +635,7 @@
 			targets = (
 				B6000001 /* Pilcrow */,
 				B6000002 /* PilcrowTests */,
+				C1000004 /* PilcrowUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -626,6 +656,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1000008 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -635,6 +666,11 @@
 			files = (
 				B2000001 /* PilcrowApp.swift in Sources */,
 				B2000002 /* PlainTextDocument.swift in Sources */,
+				B2000098 /* CoordinatedFileAccess.swift in Sources */,
+				E261519BC0C84F230D2A3E47 /* JavaScriptWorker.swift in Sources */,
+				B1CF1A68F56AE1077EA13270 /* DocumentSharing.swift in Sources */,
+				758FEC98405FECA7F01B5F8B /* SourceFileObservation.swift in Sources */,
+				4F73420777015E74DD8CA135 /* EditorRestoration.swift in Sources */,
 				B2000003 /* EditorState.swift in Sources */,
 				B2000004 /* EditorTextView.swift in Sources */,
 				B200006B /* EditorTextViewCoordinator.swift in Sources */,
@@ -667,7 +703,6 @@
 				B2000025 /* ZapGremlinsSheet.swift in Sources */,
 				B2000026 /* RevisionStore.swift in Sources */,
 				B2000027 /* RevisionsSheet.swift in Sources */,
-				B2000028 /* DocumentPickerBridge.swift in Sources */,
 				B2000029 /* FileBrowserScene.swift in Sources */,
 				B200002A /* Timing.swift in Sources */,
 				B200002B /* TextFileWrapperProxy.swift in Sources */,
@@ -709,7 +744,7 @@
 				B200004E /* SceneRouter.swift in Sources */,
 				B200004F /* PickerIntents.swift in Sources */,
 				B2000050 /* PresentationState.swift in Sources */,
-				B2000051 /* PendingURLs.swift in Sources */,
+				B2000051 /* DocumentDestination.swift in Sources */,
 				B2000052 /* TabModel.swift in Sources */,
 				B2000053 /* EditorSession.swift in Sources */,
 				B2000054 /* ClosedTabsStore.swift in Sources */,
@@ -731,10 +766,8 @@
 				B2000065 /* NewDocumentLauncherView.swift in Sources */,
 				B2000066 /* StaleSourceAlertModifier.swift in Sources */,
 				B200009A /* OpenErrorAlertModifier.swift in Sources */,
-				B200009B /* PendingCloseAlertModifier.swift in Sources */,
 				B200009C /* EditorObserversModifier.swift in Sources */,
 				B200009D /* PhoneEditorToolbar.swift in Sources */,
-				B2000068 /* BatchCloseAlertModifier.swift in Sources */,
 				B2000069 /* TabOverviewContextMenu.swift in Sources */,
 				B200006A /* EditorStatusBar.swift in Sources */,
 			);
@@ -749,11 +782,14 @@
 				B2000094 /* RevisionStoreTests.swift in Sources */,
 				B2000095 /* SessionsStoreTests.swift in Sources */,
 				B2000096 /* PlainTextDocumentEncodeTests.swift in Sources */,
+				B2000097 /* EngineeringRegressionTests.swift in Sources */,
 				B2000090 /* TransformationsTests.swift in Sources */,
+				76EE02745AEFD3AF5866B8D6 /* BasicEditingTests.swift in Sources */,
 				B2000091 /* FuzzyMatcherTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1000006 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C1000001); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -815,7 +851,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -871,7 +907,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -900,13 +936,14 @@
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow;
+				PILCROW_APP_BUNDLE_IDENTIFIER = com.palefire.pilcrow;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PILCROW_APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -932,13 +969,14 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Resources/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow;
+				PILCROW_APP_BUNDLE_IDENTIFIER = com.palefire.pilcrow;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PILCROW_APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -958,7 +996,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -977,7 +1015,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 2T9LB27UWT;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -985,6 +1023,36 @@
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pilcrow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pilcrow";
+			};
+			name = Release;
+		};
+		C1000009 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 2T9LB27UWT;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Pilcrow;
+			};
+			name = Debug;
+		};
+		C100000A = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 2T9LB27UWT;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palefire.pilcrow.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Pilcrow;
 			};
 			name = Release;
 		};
@@ -1018,6 +1086,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		C1000005 = {isa = XCConfigurationList; buildConfigurations = (C1000009, C100000A); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */

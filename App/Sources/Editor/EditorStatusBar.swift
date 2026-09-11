@@ -6,6 +6,7 @@ struct EditorStatusBar: View {
 
     let document: PlainTextDocument
     @Bindable var state: EditorState
+    var selection: NSRange? = nil
 
     @Bindable private var bus = AppStateBus.shared
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -132,6 +133,15 @@ struct EditorStatusBar: View {
     @ViewBuilder
     private var phoneOverflowMenu: some View {
         Menu {
+            if let stats = state.writingStatistics {
+                Section("Writing Statistics") {
+                    Text("\(stats.words) words · \(stats.characters) characters")
+                    if stats.hasSelection {
+                        Text("Selected: \(stats.selectedWords) words · \(stats.selectedCharacters) characters")
+                    }
+                }
+            }
+
             Menu("Encoding")     { encodingMenuChoices }
             Menu("Line Endings") { lineEndingMenuChoices }
             Menu("Syntax")       { languageMenuChoices }
@@ -237,12 +247,16 @@ struct EditorStatusBar: View {
         if state.statusShowsLineCount {
             segments.append("Lines: \(TextMetrics.lineCount(in: nsText))")
         }
-        if state.statusShowsCharCount {
-            segments.append("Chars: \(nsText.length)")
+        if let statistics = state.writingStatistics {
+            segments.append("Words: \(statistics.words)")
+            if state.statusShowsCharCount { segments.append("Chars: \(statistics.characters)") }
+            if statistics.hasSelection {
+                segments.append("Selection: \(statistics.selectedWords) words, \(statistics.selectedCharacters) chars")
+            }
         }
         if state.statusShowsLineCol {
-            let (line, column) = TextMetrics.lineColumn(for: state.selectedRange.location, in: nsText)
-            segments.append("Loc: \(state.selectedRange.location)")
+            let (line, column) = TextMetrics.lineColumn(for: (selection ?? state.selectedRange).location, in: nsText)
+            segments.append("Loc: \((selection ?? state.selectedRange).location)")
             segments.append("Ln \(line):\(column)")
         }
         return segments
@@ -250,8 +264,9 @@ struct EditorStatusBar: View {
 
     @ViewBuilder
     private var byteCountLabel: some View {
-        let bytes = document.originalData?.count ?? document.text.utf8.count
-        Text("\(bytes.formatted(.number)) bytes")
+        Text(state.writingStatistics.map { stats in
+            stats.bufferBytes.map { "\($0.formatted(.number)) buffer bytes" } ?? "Not encodable"
+        } ?? "Counting…")
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
     }
@@ -350,7 +365,7 @@ struct EditorStatusBar: View {
     }
 
     private func claimFocus() {
-        bus.scenes.claimFocus(state: state)
+        bus.scenes.claimFocus(preservingPaneOf: state)
     }
 
     private static let statusEncodingChoices: [String.Encoding] = {

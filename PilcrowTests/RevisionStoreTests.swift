@@ -192,6 +192,32 @@ final class RevisionStoreTests: XCTestCase {
         XCTAssertEqual(second.map(\.kind), [.original])
     }
 
+    func test_manifestPreservesSubsecondTimestamps() async throws {
+        let recorded = try await store.recordOriginalIfNeeded("original", forKey: key)
+        let entry = try XCTUnwrap(recorded)
+        let reloaded = await store.entries(forKey: key)
+        XCTAssertEqual(try XCTUnwrap(reloaded.first).timestamp.timeIntervalSince1970,
+                       entry.timestamp.timeIntervalSince1970, accuracy: 0.000001)
+    }
+
+    func test_legacyISO8601ManifestSurvivesUpgrade() async throws {
+        let directory = tempRoot.appendingPathComponent("Revisions/legacy")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("original".utf8).write(to: directory.appendingPathComponent("0.bin"))
+        let legacy = """
+        {"nextIndex":1,"entries":[{"id":"01234567-89AB-CDEF-0123-456789ABCDEF",
+        "index":0,"timestamp":"2026-09-04T12:00:00Z","kind":"original",
+        "byteSize":8,"preview":"original"}]}
+        """
+        try Data(legacy.utf8).write(to: directory.appendingPathComponent("meta.json"))
+        _ = try await store.recordRevision("edited", kind: .manual, forKey: "legacy")
+        let entries = await store.entries(forKey: "legacy")
+        XCTAssertEqual(entries.map(\.kind), [.original, .manual])
+        let original = await store.loadText(of: try XCTUnwrap(entries.first), forKey: "legacy")
+        XCTAssertEqual(original, "original")
+        XCTAssertEqual(entries.first?.timestamp, ISO8601DateFormatter().date(from: "2026-09-04T12:00:00Z"))
+    }
+
     // MARK: - keys
 
     func test_key_forURL_isStableAcrossEqualPaths() {

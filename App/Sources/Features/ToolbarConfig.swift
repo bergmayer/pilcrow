@@ -61,7 +61,11 @@ final class ToolbarConfig {
     private(set) var slots: [ToolbarSlot]
 
     private init() {
-        self.slots = Self.load() ?? Self.defaults
+        let loaded = Self.load() ?? Self.defaults
+        self.slots = loaded.filter { CommandRegistry.lookup(id: $0.commandId) != nil }
+        // Retired commands (including the former drafts browser) must not
+        // leave dead buttons in a previously customized toolbar.
+        if slots != loaded { save() }
     }
 
     func setSlots(_ newSlots: [ToolbarSlot]) {

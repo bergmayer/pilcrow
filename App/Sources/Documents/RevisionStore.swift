@@ -395,6 +395,12 @@ actor RevisionStore {
         let path = manifestURL(forKey: key)
         guard let data = try? Data(contentsOf: path) else { return .empty }
         let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        if let manifest = try? decoder.decode(Manifest.self, from: data) {
+            return manifest
+        }
+        // Existing histories used whole-second ISO 8601 dates. Read them
+        // until the next write upgrades the manifest without losing entries.
         decoder.dateDecodingStrategy = .iso8601
         guard let manifest = try? decoder.decode(Manifest.self, from: data) else {
             return .empty
@@ -407,7 +413,9 @@ actor RevisionStore {
         try ensureDirectory(at: path.deletingLastPathComponent())
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
+        // Eviction and auto-coalescing need the ordering of rapid edits,
+        // including histories created within the same second.
+        encoder.dateEncodingStrategy = .secondsSince1970
         do {
             let data = try encoder.encode(manifest)
             try data.write(to: path, options: .atomic)

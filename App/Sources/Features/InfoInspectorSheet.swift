@@ -2,155 +2,6 @@ import SwiftUI
 import FileEncoding
 import LineEnding
 
-/// One row in the markdown outline. Captured row index is 0-based; the
-/// `level` is the heading depth (1 for `#`, 2 for `##`, …, up to 6).
-struct OutlineEntry: Identifiable, Equatable {
-    let row: Int
-    let level: Int
-    let title: String
-    var id: Int { row }
-}
-
-/// Walks the buffer once and collects symbols suitable for an outline.
-/// Code outlines reuse `FoldDiscovery.allFoldableHeaders` so the panel
-/// and the gutter agree on what counts as a "section": every foldable
-/// region surfaces as one entry titled by its header line. Markdown
-/// keeps its own ATX walker because the outline needs the heading level
-/// (1–6), which `FoldableRegion` doesn't carry.
-@MainActor
-enum OutlineDiscovery {
-
-    static func entries(in text: NSString, language: LanguageIdentifier) -> [OutlineEntry] {
-        if language == .markdown {
-            return markdownEntries(in: text)
-        }
-        return codeEntries(in: text, language: language)
-    }
-
-    private static func codeEntries(in text: NSString, language: LanguageIdentifier) -> [OutlineEntry] {
-        let regions = FoldDiscovery.allFoldableHeaders(in: text, language: language)
-        guard !regions.isEmpty else { return [] }
-
-        // One pass over the buffer collects line ranges so we can pull
-        // each header's text by row. Cheap relative to the fold scan.
-        let lineRanges = collectLineRanges(in: text)
-        let sorted = regions.sorted { $0.headerRow < $1.headerRow }
-
-        return sorted.compactMap { region -> OutlineEntry? in
-            guard region.headerRow >= 0, region.headerRow < lineRanges.count else { return nil }
-            let lr = lineRanges[region.headerRow]
-            let raw = text.substring(with: lr).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !raw.isEmpty else { return nil }
-            // Nesting level = how many other regions enclose this header row.
-            let level = sorted.reduce(into: 1) { acc, other in
-                if other.headerRow < region.headerRow,
-                   other.bodyRange.contains(region.headerRow) {
-                    acc += 1
-                }
-            }
-            return OutlineEntry(row: region.headerRow, level: level, title: raw)
-        }
-    }
-
-    /// Line ranges keyed by row — `result[row]` is that line's NSRange
-    /// (excluding the trailing newline if present).
-    private static func collectLineRanges(in text: NSString) -> [NSRange] {
-        let length = text.length
-        var ranges: [NSRange] = []
-        var start = 0
-        var i = 0
-        while i < length {
-            let c = text.character(at: i)
-            if c == 0x0A {
-                ranges.append(NSRange(location: start, length: i - start))
-                i += 1
-                start = i
-            } else if c == 0x0D {
-                ranges.append(NSRange(location: start, length: i - start))
-                i += 1
-                if i < length, text.character(at: i) == 0x0A { i += 1 }
-                start = i
-            } else {
-                i += 1
-            }
-        }
-        if start < length {
-            ranges.append(NSRange(location: start, length: length - start))
-        } else if length == 0 || text.character(at: length - 1) == 0x0A || text.character(at: length - 1) == 0x0D {
-            ranges.append(NSRange(location: length, length: 0))
-        }
-        return ranges
-    }
-
-    private static func markdownEntries(in text: NSString) -> [OutlineEntry] {
-        let length = text.length
-        guard length > 0 else { return [] }
-
-        var entries: [OutlineEntry] = []
-        var row = 0
-        var atLineStart = true
-        var i = 0
-        while i < length {
-            if atLineStart, let level = atxLevel(at: i, in: text, length: length) {
-                if let title = headingTitle(at: i, level: level, in: text, length: length) {
-                    entries.append(OutlineEntry(row: row, level: level, title: title))
-                }
-                atLineStart = false
-            } else if atLineStart {
-                atLineStart = false
-            }
-            let c = text.character(at: i)
-            if c == 0x0A {
-                row += 1; atLineStart = true; i += 1
-            } else if c == 0x0D {
-                row += 1; atLineStart = true; i += 1
-                if i < length, text.character(at: i) == 0x0A { i += 1 }
-            } else {
-                i += 1
-            }
-        }
-        return entries
-    }
-
-    private static func atxLevel(at pos: Int, in text: NSString, length: Int) -> Int? {
-        var level = 0
-        var i = pos
-        while i < length && level < 7 {
-            let c = text.character(at: i)
-            if c == 0x23 { level += 1; i += 1 } else { break }
-        }
-        guard (1...6).contains(level) else { return nil }
-        guard i < length else { return nil }
-        let next = text.character(at: i)
-        // ATX requires a space/tab after the #s (or line end for an empty header).
-        if next == 0x20 || next == 0x09 || next == 0x0A || next == 0x0D {
-            return level
-        }
-        return nil
-    }
-
-    private static func headingTitle(at pos: Int, level: Int, in text: NSString, length: Int) -> String? {
-        var i = pos + level  // skip the #s
-        while i < length {
-            let c = text.character(at: i)
-            if c == 0x20 || c == 0x09 { i += 1 } else { break }
-        }
-        var end = i
-        while end < length {
-            let c = text.character(at: end)
-            if c == 0x0A || c == 0x0D { break }
-            end += 1
-        }
-        guard end > i else { return "" }
-        var title = text.substring(with: NSRange(location: i, length: end - i))
-        // Trim trailing `#`s and whitespace per ATX closing sequence.
-        while let last = title.last, last == "#" || last == " " || last == "\t" {
-            title.removeLast()
-        }
-        return title
-    }
-}
-
 /// File / Outline / Count inspector. Hosted as a SwiftUI side
 /// `.inspector` from `EditorView` (toggled by the ⓘ button in the
 /// bottom-right status bar) — *not* a sheet, despite the historic
@@ -158,7 +9,7 @@ enum OutlineDiscovery {
 struct InfoInspectorSheet: View {
 
     let document: PlainTextDocument
-    let state: EditorState
+    @Bindable var state: EditorState
     let onJump: (Int) -> Void
 
     enum Tab: String, CaseIterable, Identifiable {
@@ -173,11 +24,17 @@ struct InfoInspectorSheet: View {
         }
     }
 
-    @State private var tab: Tab = .file
+    @State private var fileAttributes: FileAttributes?
+    @State private var metadataError: String?
+
+    private struct MetadataRequest: Equatable {
+        let url: URL?
+        let modified: Date?
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Section", selection: $tab) {
+            Picker("Section", selection: $state.inspectorTab) {
                 ForEach(Tab.allCases) { tab in
                     Label(tab.rawValue, systemImage: tab.symbol).tag(tab)
                 }
@@ -186,10 +43,21 @@ struct InfoInspectorSheet: View {
             .labelsHidden()
             .padding(12)
 
-            switch tab {
+            switch state.inspectorTab {
             case .file:    fileSection
             case .outline: outlineSection
             }
+        }
+        .task(id: MetadataRequest(url: document.fileURL, modified: document.sourceMtimeAtLoad)) {
+            fileAttributes = nil
+            metadataError = nil
+            guard let url = document.fileURL else { return }
+            do {
+                let attributes = try await CoordinatedFileAccess.perform(at: url) { try FileAttributes(url: $0) }
+                try Task.checkCancellation()
+                fileAttributes = attributes
+            } catch is CancellationError { }
+            catch { metadataError = error.localizedDescription }
         }
     }
 
@@ -200,12 +68,25 @@ struct InfoInspectorSheet: View {
         let attrs = fileAttributes
         Form {
             Section("File") {
+                if let metadataError {
+                    Text("File information is unavailable: " + metadataError)
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 row("Created",  value: attrs?.creationDateFormatted ?? "—")
                 row("Modified", value: attrs?.modificationDateFormatted ?? "—")
                 row("Size",     value: attrs?.sizeFormatted ?? sizeFromBuffer)
                 row("Permissions", value: attrs?.permissionsFormatted ?? "—")
                 row("Owner",    value: attrs?.owner ?? "—")
                 row("Full Path", value: document.fileURL?.path ?? "Unsaved", monospaced: true, multiline: true)
+            }
+            if let statistics = state.writingStatistics {
+                Section("Writing Statistics") {
+                    row("Words", value: statistics.words.formatted())
+                    row("Characters", value: statistics.characters.formatted())
+                    row("Selected Words", value: statistics.selectedWords.formatted())
+                    row("Selected Characters", value: statistics.selectedCharacters.formatted())
+                    row("Buffer Bytes", value: statistics.bufferBytes.map { $0.formatted() } ?? "Not encodable")
+                }
             }
             Section("Text Settings") {
                 row("Encoding",     value: document.fileEncoding.localizedName)
@@ -337,11 +218,6 @@ struct InfoInspectorSheet: View {
         return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
-    private var fileAttributes: FileAttributes? {
-        guard let url = document.fileURL else { return nil }
-        return FileAttributes(url: url)
-    }
-
     // MARK: Outline
 
     @ViewBuilder
@@ -390,15 +266,15 @@ struct InfoInspectorSheet: View {
 
 // MARK: - File metadata helper
 
-private struct FileAttributes {
+private struct FileAttributes: Sendable {
     let creationDateFormatted: String
     let modificationDateFormatted: String
     let sizeFormatted: String
     let permissionsFormatted: String
     let owner: String
 
-    init?(url: URL) {
-        guard let raw = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+    init(url: URL) throws {
+        let raw = try FileManager.default.attributesOfItem(atPath: url.path)
         let dateStyle = Date.FormatStyle(date: .long, time: .shortened)
         self.creationDateFormatted = (raw[.creationDate] as? Date)?.formatted(dateStyle) ?? "—"
         self.modificationDateFormatted = (raw[.modificationDate] as? Date)?.formatted(dateStyle) ?? "—"

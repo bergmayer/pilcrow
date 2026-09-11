@@ -38,6 +38,9 @@
                ReferencedContainer = "container:Pilcrow.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference skipped = "NO" parallelizable = "NO">
+            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "C1000004" BuildableName = "PilcrowUITests.xctest" BlueprintName = "PilcrowUITests" ReferencedContainer = "container:Pilcrow.xcodeproj"/>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

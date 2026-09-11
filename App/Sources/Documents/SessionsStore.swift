@@ -14,6 +14,11 @@ struct TabSnapshot: Codable, Sendable {
     /// Human-readable tab title captured at close time. Optional keeps
     /// records written by older builds decodable.
     var displayName: String? = nil
+    var editorLayout: EditorLayoutSnapshot? = nil
+    /// The periodic checkpoint can be newer than the last lifecycle snapshot.
+    var scratchFilename: String? = nil
+
+    var recoveryFilename: String? { draftFilename ?? scratchFilename }
 }
 
 /// One window's restorable tab list. `launchID` tags every record
@@ -35,10 +40,10 @@ struct SessionRecord: Codable, Sendable {
     var persistentIdentifier: String?
 }
 
-/// A window the user deliberately dismissed while at least one tab still
-/// had unsaved changes. Unlike an open `SessionRecord`, this record is never
-/// auto-restored: it powers the Recoverable Work UI and an explicit Restore
-/// action. The draft filenames keep the local recovery payloads protected.
+/// Unsaved work from an older app version or a scene discarded without
+/// an explicit save/discard decision. Unlike an open `SessionRecord`, this
+/// record is exposed only when automatic restoration leaves work behind.
+/// Its filenames keep the local recovery payloads protected.
 struct ClosedWindowRecord: Codable, Identifiable, Sendable {
     let id: UUID
     var tabs: [TabSnapshot]
@@ -66,14 +71,14 @@ struct ClosedWindowRecord: Codable, Identifiable, Sendable {
 
     var dirtyTabCount: Int {
         tabs.reduce(into: 0) { count, tab in
-            if tab.draftFilename != nil { count += 1 }
+            if tab.recoveryFilename != nil { count += 1 }
         }
     }
 
     var tabCount: Int { tabs.count }
 
     var draftFilenames: Set<String> {
-        Set(tabs.compactMap(\.draftFilename))
+        Set(tabs.compactMap(\.recoveryFilename))
     }
 
     func sessionRecord(
@@ -203,7 +208,6 @@ final class ClosedWindowsStore {
     private let removeClosedTab: (UUID) -> Void
 
     private(set) var records: [ClosedWindowRecord]
-    private(set) var noticeRecordID: UUID?
 
     init(
         defaults: UserDefaults = .standard,
@@ -221,11 +225,6 @@ final class ClosedWindowsStore {
             .sorted { $0.closedAt > $1.closedAt }
     }
 
-    var pendingNotice: ClosedWindowRecord? {
-        guard let noticeRecordID else { return nil }
-        return record(id: noticeRecordID)
-    }
-
     func record(id: UUID) -> ClosedWindowRecord? {
         records.first { $0.id == id }
     }
@@ -238,14 +237,13 @@ final class ClosedWindowsStore {
         _ sessionRecord: SessionRecord,
         closedTabRecordIDs: [UUID] = []
     ) -> ClosedWindowRecord? {
-        guard sessionRecord.tabs.contains(where: { $0.draftFilename != nil }) else {
+        guard sessionRecord.tabs.contains(where: { $0.recoveryFilename != nil }) else {
             return nil
         }
         if let persistentID = sessionRecord.persistentIdentifier,
            let existing = records.first(where: {
                $0.sourcePersistentIdentifier == persistentID
            }) {
-            noticeRecordID = existing.id
             return existing
         }
         let archived = ClosedWindowRecord(
@@ -253,13 +251,8 @@ final class ClosedWindowsStore {
             closedTabRecordIDs: closedTabRecordIDs
         )
         records.insert(archived, at: 0)
-        noticeRecordID = archived.id
         persist()
         return archived
-    }
-
-    func dismissNotice() {
-        noticeRecordID = nil
     }
 
     /// The caller saves the replacement `SessionRecord` before invoking
@@ -269,21 +262,12 @@ final class ClosedWindowsStore {
         archived.closedTabRecordIDs.forEach(removeClosedTab)
     }
 
-    /// Used when a programmatic scene-destruction request fails. The live
-    /// session remains authoritative, so remove only the window archive.
-    func cancelArchive(_ id: UUID) {
-        _ = removeMetadata(id)
-    }
-
     /// Removes manifests that can no longer be restored as a complete
     /// window. Draft and closed-tab payloads deliberately remain untouched;
     /// the catalog will surface any surviving drafts individually.
     func pruneInvalidRecords(_ ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
         records.removeAll { ids.contains($0.id) }
-        if let noticeRecordID, ids.contains(noticeRecordID) {
-            self.noticeRecordID = nil
-        }
         persist()
     }
 
@@ -293,7 +277,7 @@ final class ClosedWindowsStore {
     func discard(_ id: UUID) {
         guard let archived = removeMetadata(id) else { return }
         archived.closedTabRecordIDs.forEach(removeClosedTab)
-        Set(archived.tabs.compactMap(\.draftFilename)).forEach(discardDraft)
+        Set(archived.tabs.compactMap(\.recoveryFilename)).forEach(discardDraft)
     }
 
     private func removeMetadata(_ id: UUID) -> ClosedWindowRecord? {
@@ -301,7 +285,6 @@ final class ClosedWindowsStore {
             return nil
         }
         let archived = records.remove(at: index)
-        if noticeRecordID == id { noticeRecordID = nil }
         persist()
         return archived
     }
@@ -496,11 +479,19 @@ final class SessionsStore {
         hasInitiatedRestore = true
         let toRestore = recordsFromPreviousLaunch()
         pendingRestores = toRestore
+        // Retire dormant launch history. Keeping it as open-window metadata
+        // would resurrect older sessions after the last current window closes.
+        // Its surviving payloads remain available through exceptional recovery.
+        records = records.filter { $0.launchID == currentLaunchID } + toRestore
+        persist()
         return toRestore.count
     }
 
-    func consumePendingRestore() -> SessionRecord? {
-        pendingRestores.isEmpty ? nil : pendingRestores.removeFirst()
+    var pendingRestoreSceneIDs: [String] { pendingRestores.map(\.sceneUUID) }
+
+    func consumePendingRestore(sceneUUID: String? = nil) -> SessionRecord? {
+        guard let index = pendingRestores.firstIndex(where: { sceneUUID == nil || $0.sceneUUID == sceneUUID }) else { return nil }
+        return pendingRestores.remove(at: index)
     }
 
     /// Records sharing the most recent prior-launch `launchID`,
@@ -556,7 +547,9 @@ extension TabSnapshot {
     @MainActor
     init(of tab: TabModel) {
         self.isPinned = tab.isPinned
+        self.editorLayout = EditorLayoutSnapshot(tab: tab)
         self.displayName = tab.document.displayName
+        if tab.needsCloseConfirmation { self.scratchFilename = tab.document.scratchFilename }
         if let url = tab.document.fileURL {
             // Bookmark under an active security scope — without it,
             // file-provider URLs fail bookmarkData and the tab silently
@@ -580,7 +573,7 @@ extension SessionRecord {
         // `.editor` tabs (populate sets no kind), surfacing as
         // "Untitled N" blanks on the next launch.
         let restorable = session.tabs.filter {
-            $0.document.fileURL != nil || $0.document.draftURL != nil
+            $0.document.fileURL != nil || $0.document.draftURL != nil || $0.needsCloseConfirmation
         }
         self.tabs = restorable.map(TabSnapshot.init(of:))
         let activeID = session.selectedTabID
@@ -611,7 +604,7 @@ enum SessionRestore {
         let error: (any Error)?
     }
 
-    static func apply(_ record: SessionRecord, to session: EditorSession) {
+    static func apply(_ record: SessionRecord, to session: EditorSession, append: Bool = false) {
         guard !record.tabs.isEmpty else { return }
         var restored: [TabModel] = []
         for snapshot in record.tabs {
@@ -621,10 +614,11 @@ enum SessionRestore {
             // nothing left to load, recovery remains available from
             // the file browser rather than intercepting this tab.
             tab.kind = .editor
-            _ = populate(tab, from: snapshot)
+            _ = populate(tab, from: snapshot, in: session)
             restored.append(tab)
         }
-        session.tabs = restored
+        if append { session.tabs += restored }
+        else { session.tabs = restored }
         let idx = min(max(record.activeIndex, 0), restored.count - 1)
         session.selectedTabID = restored[idx].id
     }
@@ -633,12 +627,16 @@ enum SessionRestore {
     /// fileBookmark or a draft file present on disk. `false` means the
     /// caller should leave the tab as a fresh blank editor.
     @discardableResult
-    private static func populate(_ tab: TabModel, from snapshot: TabSnapshot) -> Bool {
-        let draftURL = snapshot.draftFilename.flatMap { filename in
-            DraftsStore.shared.existingRecoveryURL(named: filename)
+    private static func populate(_ tab: TabModel, from snapshot: TabSnapshot, in session: EditorSession) -> Bool {
+        let draft = DraftsStore.shared.loadAll().first {
+            $0.recoveryFilename == snapshot.recoveryFilename
+                || $0.url.lastPathComponent == snapshot.scratchFilename
+        }
+        let draftURL = draft?.url ?? snapshot.recoveryFilename.flatMap {
+            DraftsStore.shared.existingRecoveryURL(named: $0)
         }
         let resolvedSource = snapshot.fileBookmark.flatMap(resolveBookmark)
-        guard draftURL != nil || resolvedSource != nil else { return false }
+        guard snapshot.recoveryFilename != nil || resolvedSource != nil else { return false }
 
         let state = tab.state
         let document = tab.document
@@ -647,7 +645,7 @@ enum SessionRestore {
         state.loadGeneration &+= 1
         let generation = state.loadGeneration
         document.isLoading = true
-        state.loadTask = Task { @MainActor [weak tab] in
+        state.loadTask = Task { @MainActor [weak tab, weak session] in
             guard let tab else { return }
             let state = tab.state
             let document = tab.document
@@ -655,10 +653,11 @@ enum SessionRestore {
                 if state.loadGeneration == generation {
                     state.loadTask = nil
                     document.isLoading = false
+                    session?.persistRestorationRecord()
                 }
             }
 
-            guard let draft = await loadDraft(at: draftURL, snapshot: snapshot) else { return }
+            guard let draft = await loadDraft(draft, fallbackURL: draftURL, allowEmpty: snapshot.fileBookmark != nil) else { return }
             guard let source = await loadSource(resolvedSource) else { return }
             guard !Task.isCancelled else { return }
 
@@ -680,6 +679,7 @@ enum SessionRestore {
                 finishWithoutDraft(sourceWasLoaded: source.payload != nil, tab: tab)
             }
 
+            if !userEdited { snapshot.editorLayout?.restore(to: tab) }
             presentRestoreError(
                 draft: draft,
                 source: source,
@@ -693,56 +693,25 @@ enum SessionRestore {
     /// Returns nil only for cancellation. Ordinary read failures are data:
     /// the source may still restore, and the caller presents the right error.
     private static func loadDraft(
-        at initialURL: URL?,
-        snapshot: TabSnapshot
+        _ draft: DraftRecord?, fallbackURL: URL?, allowEmpty: Bool
     ) async -> DraftRestoreResult? {
-        guard let initialURL else {
-            return DraftRestoreResult(text: nil, url: nil, metadata: nil, error: nil)
-        }
-
-        let allowEmpty = snapshot.fileBookmark != nil
-        var restoredURL = initialURL
-        var draftText: String?
-        var draftError: (any Error)?
         do {
-            draftText = try await DraftsStore.readText(at: initialURL, allowEmpty: allowEmpty)
+            if let draft {
+                let loaded = try await DraftsStore.shared.loadForRestoration(draft, allowEmpty: allowEmpty)
+                return DraftRestoreResult(text: loaded.text, url: loaded.url, metadata: draft.metadata, error: nil)
+            }
+            // Older zero-byte, file-backed snapshots may lack metadata and
+            // are omitted from the general catalog. The bookmark identifies
+            // an intentional deletion of all text, which must still restore.
+            let text: String?
+            if let fallbackURL { text = try await DraftsStore.readText(at: fallbackURL, allowEmpty: allowEmpty) }
+            else { text = nil }
+            return DraftRestoreResult(text: text, url: fallbackURL, metadata: nil, error: nil)
         } catch is CancellationError {
             return nil
         } catch {
-            let relocated = snapshot.draftFilename.flatMap {
-                DraftsStore.shared.existingRecoveryURL(named: $0)
-            }
-            guard let relocated,
-                  relocated.standardizedFileURL != initialURL.standardizedFileURL
-            else {
-                return DraftRestoreResult(
-                    text: nil,
-                    url: initialURL,
-                    metadata: DraftsStore.metadata(at: initialURL),
-                    error: error
-                )
-            }
-            do {
-                draftText = try await DraftsStore.readText(at: relocated, allowEmpty: allowEmpty)
-                restoredURL = relocated
-            } catch is CancellationError {
-                return nil
-            } catch {
-                draftError = error
-            }
+            return DraftRestoreResult(text: nil, url: draft?.url ?? fallbackURL, metadata: draft?.metadata, error: error)
         }
-
-        if draftText != nil,
-           let filename = snapshot.draftFilename,
-           let currentURL = DraftsStore.shared.existingRecoveryURL(named: filename) {
-            restoredURL = currentURL
-        }
-        return DraftRestoreResult(
-            text: draftText,
-            url: restoredURL,
-            metadata: DraftsStore.metadata(at: restoredURL),
-            error: draftError
-        )
     }
 
     /// Returns nil only for cancellation, mirroring `loadDraft`.
@@ -809,7 +778,7 @@ enum SessionRestore {
         presentStaleSourceCheck(
             source,
             metadata: result.metadata,
-            sourceWasLoaded: sourcePayload != nil,
+            sourcePayload: sourcePayload,
             tabID: tab.id
         )
     }
@@ -829,19 +798,18 @@ enum SessionRestore {
     private static func presentStaleSourceCheck(
         _ source: ResolvedSource?,
         metadata: DraftMetadata?,
-        sourceWasLoaded: Bool,
+        sourcePayload: PlainTextDocument.LoadPayload?,
         tabID: UUID
     ) {
         guard let source else { return }
-        let liveAttrs = PlainTextDocument.diskAttrs(of: source.url)
-        let recordedMatches = liveAttrs?.mtime == metadata?.sourceMtime
-            && liveAttrs?.size == metadata?.sourceSize
-        if liveAttrs == nil {
+        let recordedMatches = sourcePayload?.modificationDate == metadata?.sourceMtime
+            && sourcePayload?.data.count == metadata?.sourceSize
+        if sourcePayload == nil {
             AppStateBus.shared.presentation.sourceStaleCheck = .missing(
                 tabID: tabID,
                 displayName: source.url.lastPathComponent
             )
-        } else if source.isStale || !recordedMatches || !sourceWasLoaded {
+        } else if source.isStale || !recordedMatches {
             AppStateBus.shared.presentation.sourceStaleCheck = .changedOnAdopt(
                 tabID: tabID,
                 displayName: source.url.lastPathComponent
@@ -870,7 +838,7 @@ enum SessionRestore {
         if let error = draft.error {
             AppStateBus.shared.presentation.openErrorMessage =
                 "Couldn't restore an unsaved draft: \(error.localizedDescription)"
-        } else if snapshot.draftFilename != nil, originalDraftURL == nil {
+        } else if snapshot.recoveryFilename != nil, originalDraftURL == nil {
             AppStateBus.shared.presentation.openErrorMessage =
                 "A recovery draft from the previous session is missing."
         } else if let error = source.error, draft.text == nil {
@@ -892,20 +860,24 @@ enum SessionRestore {
 }
 
 /// Bridges `view.window?.windowScene` back into SwiftUI so
-/// `EditorScene` can hand its `UIWindowScene` to `SessionsStore`
-/// for close-detection. SwiftUI doesn't expose the host scene on
-/// iOS, hence the UIKit dip.
+/// `EditorScene` can register its session and configure native close warnings.
 struct SceneRegistrationBridge: UIViewRepresentable {
 
     let sceneUUID: String
+    let unsavedDocumentCount: Int
+    let onReview: () -> Void
+    let onClose: () -> Void
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+    func makeUIView(context: Context) -> SceneRegistrationView {
+        let view = SceneRegistrationView()
         view.isUserInteractionEnabled = false
         return view
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
+    func updateUIView(_ uiView: SceneRegistrationView, context: Context) {
+        uiView.onReview = onReview
+        uiView.onClose = onClose
+        uiView.unsavedDocumentCount = unsavedDocumentCount
         // sceneUUID starts empty, becomes non-empty on the first
         // `onAppear` once `applySessionRestoreIfNeeded` runs. The
         // dispatch hops past this render so `view.window` is wired.
@@ -915,5 +887,67 @@ struct SceneRegistrationBridge: UIViewRepresentable {
             guard let scene = uiView.window?.windowScene else { return }
             SessionsStore.shared.register(scene, sceneUUID: uuid)
         }
+    }
+
+    static func dismantleUIView(_ uiView: SceneRegistrationView, coordinator: ()) {
+        uiView.clearClosureConfirmation()
+    }
+}
+
+/// UIKit closes the scene after any non-cancel confirmation action. Reviewing
+/// must cancel that request before handing control back to the owning window.
+final class SceneRegistrationView: UIView {
+    var onReview: () -> Void = {}
+    var onClose: () -> Void = {}
+    var unsavedDocumentCount = 0 {
+        didSet {
+            guard oldValue != unsavedDocumentCount else { return }
+            updateClosureConfirmation()
+        }
+    }
+
+    private weak var configuredScene: UIWindowScene?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateClosureConfirmation()
+    }
+
+    func clearClosureConfirmation() {
+        configuredScene?.closureConfirmation = nil
+        configuredScene = nil
+    }
+
+    private func updateClosureConfirmation() {
+        let scene = window?.windowScene
+        if configuredScene !== scene { clearClosureConfirmation() }
+        guard let scene else { return }
+        configuredScene = scene
+        guard unsavedDocumentCount > 0 else {
+            scene.closureConfirmation = nil
+            return
+        }
+        let subject = unsavedDocumentCount == 1 ? "1 tab has" : "\(unsavedDocumentCount) tabs have"
+        scene.closureConfirmation = UISceneClosureConfirmation(
+            title: "Close Window With Unsaved Changes?",
+            message: "\(subject) changes that haven't been saved to a file. Review them to choose what to save or keep editing. Don’t Save discards these changes and closes the window.",
+            actions: closureActions()
+        )
+    }
+
+    func closureActions() -> [UIAlertAction] {
+        [
+            // Only .cancel keeps the scene alive. A .default action proceeds
+            // with destruction as soon as its synchronous handler returns;
+            // it cannot wait for a review sheet, file picker, or async save.
+            UIAlertAction(title: "Review Changes…", style: .cancel) { [weak self] _ in
+                // Let UIKit finish its confirmation callback before SwiftUI
+                // presents the review. This handler never saves or discards.
+                DispatchQueue.main.async { [weak self] in self?.onReview() }
+            },
+            UIAlertAction(title: "Don’t Save", style: .destructive) { [weak self] _ in
+                self?.onClose()
+            }
+        ]
     }
 }

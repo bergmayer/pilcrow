@@ -113,26 +113,19 @@ final class TemplatesStore {
 /// opening or modifying the template file itself.
 @MainActor
 enum TemplateWorkflow {
-    static func apply(
-        _ template: TemplateRecord,
-        document: PlainTextDocument,
-        state: EditorState
-    ) {
-        let body = TemplatesStore.shared.loadContent(template) ?? ""
-        document.text = body
-        document.fileURL = nil
-        document.isDirty = !body.isEmpty
-        state.text = body
-        state.fileURL = nil
-        state.savedBaselineText = ""
-        state.languageIdentifier = LanguageRegistry.identifier(for: template.url)
-        state.requestEditorFocus()
+    static func apply(_ template: TemplateRecord, to tab: TabModel) {
+        guard let body = TemplatesStore.shared.loadContent(template) else {
+            AppStateBus.shared.presentation.openErrorMessage =
+                "Couldn't read the template \(template.url.lastPathComponent). Choose another template or check the file in Files."
+            return
+        }
+        tab.startDocument(with: body)
+        tab.state.languageIdentifier = LanguageRegistry.identifier(for: template.url)
     }
 }
 
-/// Focused counterpart to the old all-purpose new-document launcher.
-/// New remains an immediate blank buffer; this sheet appears only when
-/// the user explicitly asks for New from Template.
+/// Picker for the explicit New from Template command. The window's start
+/// screen also offers templates directly.
 struct TemplatePickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var templates: [TemplateRecord] = []

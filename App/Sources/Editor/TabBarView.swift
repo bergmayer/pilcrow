@@ -1,24 +1,69 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Horizontal Safari-style tab strip shown above the editor when a
-/// window has more than one tab. Pinned tabs render as compact
-/// favicon-style chips on the left; unpinned tabs follow with full
-/// filenames. Long-press a tab for the context menu (close / pin /
-/// close others / close to the right); drag a tab to reorder it
-/// within its half of the strip. The trailing area carries the
-/// new-tab `+` button (long-press for templates/recently-closed) and the
-/// Show-All-Tabs grid button.
+/// Two presentations of the same window's tabs: a horizontal strip or a
+/// document list. Both share selection, close, pin, drag, and creation actions.
 struct TabBarView: View {
     @Bindable var session: EditorSession
+    var appearance: DocumentTabAppearance = .tabBar
+    var onSelection: (() -> Void)?
 
     /// Leading inset that keeps the leftmost tab clear of iPad's
     /// stoplight (close / minimize / resize) chrome at the top-left
     /// of the window. Matches the inset `WindowToolbar` uses.
     private let stoplightInset: CGFloat = 70
-    private let stripHeight: CGFloat = 46
+    private let stripHeight: CGFloat = 50
 
     var body: some View {
+        Group {
+            if appearance == .sidebar {
+                documentList
+            } else {
+                horizontalBar
+            }
+        }
+        .dropDestination(for: String.self) { items, _ -> Bool in
+            return session.acceptTabDrop(items)
+        }
+    }
+
+    private var documentList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Open Documents")
+                    .font(.headline)
+                Spacer(minLength: 0)
+                Text("\(session.tabs.count)")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            Divider()
+            ScrollViewReader { scroll in
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(session.tabs) { tab in
+                            draggablePill(for: tab)
+                        }
+                    }
+                    .padding(6)
+                }
+                .onChange(of: session.selectedTabID, initial: true) { _, id in
+                    scroll.scrollTo(id)
+                }
+            }
+            Divider()
+            HStack {
+                plusButton
+                Spacer()
+                showAllTabsButton
+            }
+            .padding(.horizontal, 6)
+        }
+        .background(Color(.secondarySystemBackground))
+        .accessibilityIdentifier("document-sidebar")
+    }
+
+    private var horizontalBar: some View {
         ZStack(alignment: .bottom) {
             Color(.secondarySystemBackground)
             // The active tab is opaque and reaches the bottom edge, hiding
@@ -34,45 +79,37 @@ struct TabBarView: View {
                 .padding(.top, 6)
         }
         .frame(height: stripHeight)
-        // Strip-level drop destination: drops on empty space (not on
-        // a specific pill) append the dragged tab to this window.
-        // Drops on a specific pill still go through that pill's own
-        // dropDestination first.
-        .dropDestination(for: String.self) { items, _ -> Bool in
-            return adoptDroppedTab(items: items)
-        }
-    }
 
-    /// Cross-window adopt: drag a tab from another window and drop
-    /// on this strip's blank area → migrate it here. Same-window
-    /// drops on blank area are no-ops (use the pill drop to reorder).
-    private func adoptDroppedTab(items: [String]) -> Bool {
-        guard let raw = items.first,
-              let uuid = UUID(uuidString: raw)
-        else { return false }
-        guard !session.tabs.contains(where: { $0.id == uuid }),
-              let source = AppStateBus.shared.scenes.session(containing: uuid),
-              source !== session,
-              let tab = source.detachTab(uuid)
-        else { return false }
-        session.attachTab(tab)
-        return true
     }
 
     @ViewBuilder
     private var tabStrip: some View {
-        // Safari-style equal-width tabs: unpinned pills share the
-        // available width evenly; pinned pills stay compact (fixed
-        // size). `+` and Show-All-Tabs sit at the trailing end at
-        // their natural widths.
-        HStack(alignment: .bottom, spacing: 3) {
-            ForEach(session.tabs) { tab in
-                draggablePill(for: tab)
-                    .frame(maxWidth: tab.isPinned ? nil : .infinity)
-                    .zIndex(tab.id == session.selectedTabID ? 1 : 0)
+        GeometryReader { geometry in
+            let pinnedCount = session.tabs.count(where: \.isPinned)
+            let flexibleCount = max(1, session.tabs.count - pinnedCount)
+            let availableWidth =
+                geometry.size.width - 96 - CGFloat(pinnedCount * 44)
+                - CGFloat(max(0, session.tabs.count - 1) * 3)
+            let tabWidth = max(120, availableWidth / CGFloat(flexibleCount))
+            HStack(alignment: .bottom, spacing: 4) {
+                ScrollViewReader { scroll in
+                    ScrollView(.horizontal) {
+                        HStack(alignment: .bottom, spacing: 3) {
+                            ForEach(session.tabs) { tab in
+                                draggablePill(for: tab)
+                                    .frame(width: tab.isPinned ? 44 : tabWidth)
+                            }
+                        }
+                    }
+                    .scrollIndicators(.hidden)
+                    .onAppear { scroll.scrollTo(session.selectedTabID) }
+                    .onChange(of: session.selectedTabID) { _, id in
+                        withAnimation { scroll.scrollTo(id) }
+                    }
+                }
+                plusButton
+                showAllTabsButton
             }
-            plusButton
-            showAllTabsButton
         }
     }
 
@@ -81,10 +118,12 @@ struct TabBarView: View {
         TabPillView(
             tab: tab,
             isActive: tab.id == session.selectedTabID,
-            // Always closeable — the last close spawns a blank editor
-            // tab in place rather than emptying the session.
-            isCloseable: true,
-            onSelect: { session.selectedTabID = tab.id },
+            appearance: appearance,
+            onSelect: {
+                AppStateBus.shared.scenes.claimFocus(session: session)
+                session.selectedTabID = tab.id
+                onSelection?()
+            },
             onClose:  { CommandActions.requestCloseTab(tab.id, in: session) },
             onPin:    { session.togglePinned(tab.id) }
         )
@@ -93,36 +132,19 @@ struct TabBarView: View {
             TabDragPreview(label: tabLabel(tab))
         }
         .dropDestination(for: String.self) { items, _ -> Bool in
-            return handleDrop(items: items, onto: tab.id)
+            return session.acceptTabDrop(items, onto: tab.id)
         }
-    }
-
-    private func handleDrop(items: [String], onto tabID: UUID) -> Bool {
-        guard let raw = items.first,
-              let uuid = UUID(uuidString: raw),
-              let toIdx = session.tabs.firstIndex(where: { $0.id == tabID })
-        else { return false }
-        // Same-session: just reorder. Cross-session: detach from
-        // source, attach here at the drop location.
-        if session.tabs.contains(where: { $0.id == uuid }) {
-            session.moveTab(id: uuid, to: toIdx)
-        } else if let source = AppStateBus.shared.scenes.session(containing: uuid),
-                  source !== session,
-                  let tab = source.detachTab(uuid) {
-            session.attachTab(tab)
-            session.moveTab(id: uuid, to: toIdx)
-        }
-        return true
     }
 
     @ViewBuilder
     private var plusButton: some View {
-        // Tap → new tab. Long-press → recently-closed list (Safari
-        // parity). Implemented as a Menu with a `primaryAction` tap
+        // Tap → new tab. Long-press → recently-closed list.
+        // Implemented as a Menu with a `primaryAction` tap
         // handler so both gestures work without extra plumbing.
         Menu {
             Button {
                 AppStateBus.shared.scenes.claimFocus(session: session)
+                onSelection?()
                 CommandActions.newFromTemplate()
             } label: {
                 Label("New from Template…", systemImage: "doc.badge.plus")
@@ -136,6 +158,7 @@ struct TabBarView: View {
                         Button {
                             AppStateBus.shared.scenes.claimFocus(session: session)
                             CommandActions.reopenClosedTab(record)
+                            onSelection?()
                         } label: {
                             Label(record.displayName, systemImage: record.fileURL == nil ? "doc.text" : "doc")
                         }
@@ -144,18 +167,19 @@ struct TabBarView: View {
             }
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 28, height: 28)
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 44, height: 44)
                 .foregroundStyle(.secondary)
         } primaryAction: {
             // Route through CommandActions so +, Cmd-T, and the menus all
             // use the same to-the-right insertion rule and blank editor.
             AppStateBus.shared.scenes.claimFocus(session: session)
             CommandActions.newTab()
+            onSelection?()
         }
         .menuStyle(.borderlessButton)
         .accessibilityLabel("New Tab")
-        .padding(.leading, 4)
+        .help("New Tab")
     }
 
     @ViewBuilder
@@ -163,20 +187,18 @@ struct TabBarView: View {
         Button {
             AppStateBus.shared.scenes.claimFocus(session: session)
             CommandActions.showTabSwitcher()
+            onSelection?()
         } label: {
             Image(systemName: "square.on.square")
-                .font(.system(size: 12, weight: .regular))
+                .font(.system(size: 17, weight: .regular))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.secondary)
-                // 44pt frame to match HIG touch-target sizing so the
-                // long-press gesture is easy to land. Icon stays at
-                // 12pt visually.
                 .frame(width: 44, height: 44)
                 .contentShape(.rect)
         }
         .buttonStyle(.borderless)
-        .help("Show All Tabs")
-        .accessibilityLabel("Show All Tabs")
+        .help("Tab Overview")
+        .accessibilityLabel("Tab Overview")
         // Long-press surfaces the multi-tab management menu. Same
         // entries as the iPhone status-bar overview button.
         .contextMenu { TabOverviewContextMenu(session: session) }
@@ -206,12 +228,45 @@ private struct TabDragPreview: View {
 private struct TabPillView: View {
     @Bindable var tab: TabModel
     let isActive: Bool
-    let isCloseable: Bool
+    let appearance: DocumentTabAppearance
     let onSelect: () -> Void
     let onClose: () -> Void
     let onPin: () -> Void
 
     var body: some View {
+        Group {
+            if appearance == .sidebar {
+                HStack(spacing: 0) {
+                    Button(action: onSelect) {
+                        Label(label, systemImage: tab.isPinned ? "pin.fill" : "doc.text")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    Button(action: onClose) {
+                        Image(systemName: "xmark.circle")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close \(label)")
+                }
+                .padding(.leading, 8)
+                .background(isActive ? Color.accentColor.opacity(0.15) : .clear, in: .rect(cornerRadius: 6))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("document-row-\(tab.id)")
+            } else {
+                pill
+            }
+        }
+        .contextMenu { contextMenu }
+        .accessibilityValue(isActive ? "Active" : "Inactive")
+        .accessibilityAddTraits(isActive ? .isSelected : [])
+    }
+
+    private var pill: some View {
         pillContent
             .frame(height: isActive ? 40 : 32)
             .background { pillBackground }
@@ -230,7 +285,6 @@ private struct TabPillView: View {
             .padding(.bottom, isActive ? 0 : 4)
             .contentShape(.rect)
             .onTapGesture { onSelect() }
-            .contextMenu { contextMenu }
             .accessibilityElement(children: .combine)
             .accessibilityLabel(accessibilityLabel)
             .accessibilityValue(isActive ? "Active" : "Inactive")
@@ -248,8 +302,7 @@ private struct TabPillView: View {
     }
 
     /// Pinned tab: compact favicon-style chip. No filename text, no
-    /// close button — matches Safari's pinned-tab footprint. Long-
-    /// press for the context menu to unpin / close.
+    /// close button. Long-press for the context menu to unpin / close.
     @ViewBuilder
     private var pinnedChip: some View {
         Image(systemName: pinnedIconName)
@@ -272,16 +325,15 @@ private struct TabPillView: View {
             // its parent gives it. Without this, the HStack would
             // collapse to its content width.
             Spacer(minLength: 0)
-            if isCloseable {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .padding(4)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Close Tab")
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(.rect)
             }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Close Tab")
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -331,12 +383,13 @@ private struct TabPillView: View {
         Button {
             onPin()
         } label: {
-            Label(tab.isPinned ? "Unpin Tab" : "Pin Tab",
+            Label(
+                tab.isPinned ? "Unpin Tab" : "Pin Tab",
                   systemImage: tab.isPinned ? "pin.slash" : "pin")
         }
         if DeviceIdiom.supportsMultipleWindows {
             Button {
-                CommandActions.moveTab(tab.id, toNewWindow: true)
+                CommandActions.moveTabToNewWindow(tab.id)
             } label: {
                 Label("Move Tab to New Window", systemImage: "macwindow.badge.plus")
             }
@@ -350,7 +403,7 @@ private struct TabPillView: View {
     private var label: String {
         switch tab.kind {
         case .fileBrowser: return "New Tab"
-        case .launcher:    return "New Tab"
+        case .launcher:    return "Start Page"
         case .editor:
             let base = tab.document.displayName
             // Only show the unsaved-dot for genuinely dirty buffers.

@@ -14,6 +14,7 @@ enum AppPreferenceKey {
     static let ligatures              = "ligatures"
 
     // MARK: Editor display
+    static let documentTabAppearance = "documentTabAppearance"
     static let showLineNumbers        = "showLineNumbers"
     static let wrapLines              = "wrapLines"
     static let highlightCurrentLine   = "highlightCurrentLine"
@@ -66,6 +67,8 @@ enum AppPreferenceKey {
     static let saveUTF8BOM            = "saveUTF8BOM"
 
     // MARK: Defaults for new documents
+    static let newWindowContent = "newWindowContent"
+    static let newTabContent = "newTabContent"
     static let defaultEncodingRaw     = "defaultEncodingRaw"
     static let defaultLineEndingRaw   = "defaultLineEndingRaw"
     static let defaultLanguage        = "defaultLanguage"
@@ -123,6 +126,7 @@ enum AppPreferenceDefaults {
             AppPreferenceKey.ligatures: false,
 
             // Editor display
+            AppPreferenceKey.documentTabAppearance: DocumentTabAppearance.tabBar.rawValue,
             AppPreferenceKey.showLineNumbers: true,
             AppPreferenceKey.wrapLines: true,
             AppPreferenceKey.highlightCurrentLine: true,
@@ -166,6 +170,8 @@ enum AppPreferenceDefaults {
             AppPreferenceKey.saveUTF8BOM: false,
 
             // Defaults for new documents
+            AppPreferenceKey.newWindowContent: NewDocumentContent.startPage.rawValue,
+            AppPreferenceKey.newTabContent: NewDocumentContent.blankDocument.rawValue,
             AppPreferenceKey.defaultEncodingRaw: Int(String.Encoding.utf8.rawValue),
             AppPreferenceKey.defaultLineEndingRaw: "\n",
             AppPreferenceKey.defaultLanguage: LanguageIdentifier.markdown.rawValue,

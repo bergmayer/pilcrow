@@ -11,21 +11,22 @@ import UniformTypeIdentifiers
 /// the user wants). The browser window stays open so the user can
 /// keep picking files without having to reopen it each time.
 struct FileBrowserScene: View {
-
+    let request: UtilityWindowRequest?
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
-        FileBrowserWithRecovery(
-            dismiss: { dismissWindow(id: SceneID.fileBrowser.rawValue) }
+        FileBrowserRepresentable(
+            dismiss: { dismissWindow() }
         )
             .ignoresSafeArea()
             .onAppear {
                 // Same dismiss-on-restore guard the palette uses so
                 // iPadOS doesn't relaunch the app into the file
                 // browser after the user quit while it was open.
-                if !AppStateBus.shared.scenes.consumeOpen(.fileBrowser) {
-                    AppStateBus.shared.scenes.openWindow?(.editor)
-                    dismissWindow(id: SceneID.fileBrowser.rawValue)
+                if request?.launchID != SessionsStore.shared.currentLaunchID {
+                    openWindow(id: SceneID.editor.rawValue, value: EditorRoute.newDocument())
+                    dismissWindow()
                 }
             }
     }
@@ -36,11 +37,16 @@ struct FileBrowserScene: View {
 /// Same browser UI; the dismiss action comes from the sheet's own
 /// environment instead of `dismissWindow`.
 struct FileBrowserSheetView: View {
+    let owner: EditorSession?
 
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        FileBrowserWithRecovery(dismiss: { dismiss() })
+        FileBrowserRepresentable(dismiss: { dismiss() }, onPick: { [weak owner] url in
+            guard let owner, AppStateBus.shared.scenes.allOpenSessions.contains(where: { $0 === owner }) else { return }
+            CommandActions.routeOpenURL(url, in: owner, destination: .tab)
+            dismiss()
+        })
             .ignoresSafeArea()
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
@@ -80,111 +86,12 @@ struct FileBrowserTabContent: View {
             .padding(.vertical, 8)
             .background(.bar)
 
-            FileBrowserWithRecovery(
+            FileBrowserRepresentable(
                 dismiss: { /* no-op: the tab outlives the pick */ },
                 onPick: onPick
             )
             .ignoresSafeArea(edges: .bottom)
         }
-    }
-}
-
-/// Adds app-owned recovery access immediately above the system document
-/// browser's Recents/Browse surface. `UIDocumentBrowserViewController`
-/// doesn't expose an API for inserting custom rows into its Recents list,
-/// so this persistent bar is the nearest native-safe placement.
-private struct FileBrowserWithRecovery: View {
-
-    let dismiss: () -> Void
-    var onPick: ((URL) -> Void)?
-
-    @State private var drafts: [DraftRecord] = []
-    @State private var showingRecovery = false
-    @Bindable private var closedWindows = ClosedWindowsStore.shared
-
-    private var catalog: RecoverableWorkCatalog {
-        RecoverableWorkCatalog(
-            drafts: drafts,
-            closedWindows: closedWindows.records,
-            excludedDraftFilenames: openDraftFilenames
-        )
-    }
-
-    private var openDraftFilenames: Set<String> {
-        Set(AppStateBus.shared.scenes.allOpenSessions.flatMap { session in
-            session.tabs.flatMap(\.document.liveRecoveryFilenames)
-        })
-    }
-
-    private var recoveryCount: Int {
-        catalog.windows.count + catalog.drafts.count
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Button {
-                showingRecovery = true
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "tray.full")
-                        .font(.title3)
-                        .foregroundStyle(recoveryCount == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
-                        .frame(width: 28)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Recoverable Work")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                        Text(recoveryDetail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 8)
-                    if recoveryCount > 0 {
-                        Text("Review")
-                            .font(.subheadline)
-                            .foregroundStyle(.tint)
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(.rect)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-            }
-            .buttonStyle(.plain)
-
-            Divider()
-
-            FileBrowserRepresentable(dismiss: dismiss, onPick: onPick)
-        }
-        .background(.bar)
-        .onAppear(perform: refreshRecovery)
-        .onChange(of: closedWindows.records.map(\.id)) { _, _ in
-            refreshRecovery()
-        }
-        .sheet(isPresented: $showingRecovery, onDismiss: refreshRecovery) {
-            DraftsRecoverySheet()
-        }
-    }
-
-    private var recoveryDetail: String {
-        switch recoveryCount {
-        case 0: return "Nothing to recover"
-        case 1: return "1 item available"
-        default: return "\(recoveryCount) items available"
-        }
-    }
-
-    private func refreshRecovery() {
-        let loaded = DraftsStore.shared.loadAll()
-        let normalized = RecoverableWorkCatalog(
-            drafts: loaded,
-            closedWindows: closedWindows.records,
-            excludedDraftFilenames: openDraftFilenames
-        )
-        closedWindows.pruneInvalidRecords(normalized.invalidWindowIDs)
-        drafts = loaded
     }
 }
 
@@ -297,7 +204,7 @@ struct FileBrowserRepresentable: UIViewControllerRepresentable {
 
         @MainActor
         private static func route(_ url: URL) {
-            CommandActions.routeOpenURL(url)
+            CommandActions.routeOpenURL(url, destination: .window)
         }
     }
 }

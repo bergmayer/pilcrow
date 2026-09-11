@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import EditorEngine
 
 @MainActor
 extension CommandActions {
@@ -15,6 +16,11 @@ extension CommandActions {
 
     /// `seedFindFromSelection` is split out so menu actions can seed
     /// before routing the sheet through `@FocusedValue`.
+    static func presentFindAndReplace() {
+        context.find.pendingShowReplace = true
+        presentFindNavigator()
+    }
+
     static func presentFindNavigator() {
         seedFindFromSelection()
         presentSheet(.findReplace)
@@ -33,10 +39,7 @@ extension CommandActions {
 
     /// iPad: its own scene so it stays on-screen while the user
     /// clicks results. iPhone: a sheet on the active editor. The
-    /// `requestOpenWindow` call lets either path pass the scene's
-    /// onAppear restore guard.
     static func presentMultiFileSearch() {
-        Self.context.scenes.requestOpenWindow(.multiFileSearch)
         if DeviceIdiom.isPhone {
             Self.context.presentation.present(.multiFileSearch, owner: Self.context.scenes.currentEditor)
         } else {
@@ -63,113 +66,85 @@ extension CommandActions {
         recordPositionIfJumped()
     }
 
-    /// Ignores cursor position; equivalent to wrap-around without
-    /// the "did it wrap?" ambiguity.
     static func findFirst() {
-        guard let textView = actions else { return }
-        let ctx = Self.context.find.context
-        guard !ctx.query.isEmpty else { return }
-        let length = (textView.text as NSString).length
-        if let match = try? matchInDocument(context: ctx, forward: true, startingAt: 0, totalLength: length) {
-            textView.setSelection(match.range)
-            textView.scrollSelectionToVisible()
+        do {
+            guard let textView = actions,
+                  let match = try documentSearch(in: textView).matches.first else { return }
+            revealMatch(match)
             recordPositionIfJumped()
-        }
+        } catch { context.presentation.openErrorMessage = error.localizedDescription }
     }
 
-    /// Replaces every match within the current selection only.
     static func replaceAllInSelection() {
-        replaceAll(inRange: actions?.selectedRange)
+        guard let range = actions?.selectedRange, range.length > 0 else { return }
+        replaceMatchesReportingErrors(in: range)
     }
 
-    /// Replaces every match from the cursor to the end of the document.
     static func replaceToEnd() {
         guard let textView = actions else { return }
         let cursor = textView.selectedRange.location
-        let length = (textView.text as NSString).length
-        guard cursor < length else { return }
-        replaceAll(inRange: NSRange(location: cursor, length: length - cursor))
+        replaceMatchesReportingErrors(in: NSRange(location: cursor, length: (textView.text as NSString).length - cursor))
     }
 
-    /// Shared by Replace All in Selection / Replace to End so both
-    /// reach the same regex / case / undo handling.
-    private static func replaceAll(inRange range: NSRange?) {
-        guard let textView = actions, let range, range.length > 0 else { return }
-        guard let original = textView.text(in: range) else { return }
-        let ctx = Self.context.find.context
-        guard !ctx.query.isEmpty else { return }
-        do {
-            let newText: String
-            if FindCompile.useRegex(for: ctx) {
-                let re = try FindCompile.regex(for: ctx)
-                newText = re.stringByReplacingMatches(
-                    in: original,
-                    options: [],
-                    range: NSRange(location: 0, length: (original as NSString).length),
-                    withTemplate: ctx.replacement
-                )
-            } else {
-                newText = original.replacingOccurrences(
-                    of: ctx.query,
-                    with: ctx.replacement,
-                    options: ctx.caseSensitive ? [] : [.caseInsensitive]
-                )
-            }
-            textView.replace(range, withText: newText)
-            commitTextChange()
-        } catch {
-            // Invalid regex — silently no-op; sheet surfaces user errors.
-        }
+    private static func replaceMatchesReportingErrors(in range: NSRange) {
+        do { _ = try replaceAllMatches(in: range) }
+        catch { context.presentation.openErrorMessage = error.localizedDescription }
+    }
+
+    static func documentSearch(in textView: PilcrowTextView) throws -> DocumentSearch {
+        var find = context.find.context
+        find.replacement = find.replacement.replacingLineEndings(with: state?.lineEnding ?? .lf)
+        return try DocumentSearch(text: textView.text, context: find)
+    }
+
+    @discardableResult
+    static func replaceAllMatches(in range: NSRange? = nil) throws -> Int {
+        guard let textView = actions else { return 0 }
+        let search = try documentSearch(in: textView)
+        let matches = range.map { search.matches(in: $0) } ?? search.matches
+        textView.replaceText(in: BatchReplaceSet(replacements: matches.map {
+            .init(range: $0.range, text: $0.replacement)
+        }))
+        commitTextChange()
+        return matches.count
+    }
+
+    /// Validate the selection against the complete document, including context
+    /// outside it. An arbitrary selection is never a replacement target.
+    @discardableResult
+    static func replaceSelectedMatch() throws -> Bool {
+        guard let textView = actions else { return false }
+        let search = try documentSearch(in: textView)
+        guard let match = search.matches.first(where: { $0.range == textView.selectedRange }) else { return false }
+        textView.replaceText(in: BatchReplaceSet(replacements: [.init(range: match.range, text: match.replacement)]))
+        textView.setSelection(NSRange(location: match.range.location + (match.replacement as NSString).length, length: 0))
+        commitTextChange()
+        return true
     }
 
     static func jumpToSelection() { actions?.scrollSelectionToVisible() }
 
-    // MARK: - Find iteration
-
     static func stepToMatch(forward: Bool) {
-        guard let textView = actions else { return }
-        let ctx = Self.context.find.context
-        guard !ctx.query.isEmpty else { return }
-        let cursor = forward
-            ? NSMaxRange(textView.selectedRange)
-            : textView.selectedRange.location
-        do {
-            let length = (textView.text as NSString).length
-            if let match = try matchInDocument(context: ctx, forward: forward, startingAt: cursor, totalLength: length) {
-                textView.setSelection(match.range)
-                textView.scrollSelectionToVisible()
-                recordPositionIfJumped()
-            } else if let wrap = try matchInDocument(
-                context: ctx,
-                forward: forward,
-                startingAt: forward ? 0 : length,
-                totalLength: length
-            ) {
-                textView.setSelection(wrap.range)
-                textView.scrollSelectionToVisible()
-                recordPositionIfJumped()
-            }
-        } catch {
-            // Invalid regex etc. — surfaced by the sheet UI; nothing to do here.
-        }
+        do { _ = try selectSearchMatch(forward: forward) }
+        catch { context.presentation.openErrorMessage = error.localizedDescription }
     }
 
-    /// Compile the persistent context's pattern + find the first match at
-    /// or after `cursor`. Returns nil if no match in the search range.
-    static func matchInDocument(
-        context: FindContext,
-        forward: Bool,
-        startingAt cursor: Int,
-        totalLength: Int
-    ) throws -> QueryReplaceMatch? {
-        return try Self.nextQueryReplaceMatch(
-            query: FindCompile.effectivePattern(for: context),
-            replacement: context.replacement,
-            useRegex: FindCompile.useRegex(for: context),
-            caseSensitive: context.caseSensitive,
-            startingAt: forward ? cursor : 0,
-            searchUpTo: forward ? totalLength : cursor,
-            preferLast: !forward
-        )
+    /// Remember zero-width selection per editor so the first Find can land on
+    /// the caret, while subsequent Find commands advance instead of stalling.
+    static func selectSearchMatch(forward: Bool) throws -> String {
+        guard let textView = actions else { return "No editor." }
+        let search = try documentSearch(in: textView)
+        let selection = textView.selectedRange
+        let last = state?.lastFindSelection
+        let isCurrent = selection.length > 0 || (last?.text == search.text
+            && last?.context == search.context && last?.range == selection)
+        guard let match = search.next(from: selection, forward: forward, excludingCurrent: isCurrent) else {
+            return "No other matches."
+        }
+        revealMatch(match)
+        state?.lastFindSelection = (search.text, search.context, match.range)
+        recordPositionIfJumped()
+        let index = search.matches.firstIndex(of: match) ?? 0
+        return "Match \(index + 1) of \(search.matches.count)."
     }
 }

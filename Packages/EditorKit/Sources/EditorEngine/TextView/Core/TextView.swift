@@ -60,6 +60,20 @@ open class TextView: UIScrollView {
             contentSize = preferredContentSize
         }
     }
+    /// Connect mounted panes of one document to a single undo history.
+    public func shareUndoHistory(with other: TextView) {
+        textInputView.timedUndoManager = other.textInputView.timedUndoManager
+    }
+
+    /// Apply a completed sibling edit without interpreting input or adding
+    /// another undo operation. The passive pane keeps its scroll position.
+    public func applySynchronizedEdit(in range: NSRange, replacementText: String) {
+        let wasAutomatic = isAutomaticScrollEnabled
+        isAutomaticScrollEnabled = false
+        defer { isAutomaticScrollEnabled = wasAutomatic }
+        textInputView.applySynchronizedEdit(in: range, replacementText: replacementText)
+    }
+
     /// A Boolean value that indicates whether the text view is editable.
     public var isEditable = true {
         didSet {
@@ -533,7 +547,7 @@ open class TextView: UIScrollView {
     /// The overscroll is a factor of the scrollable area height and will not take into account any insets. 0 means no overscroll and 1 means an amount equal to the height of the text view. Detaults to 0.
     public var verticalOverscrollFactor: CGFloat = 0 {
         didSet {
-            if horizontalOverscrollFactor != oldValue {
+            if verticalOverscrollFactor != oldValue {
                 hasPendingContentSizeUpdate = true
                 handleContentSizeUpdateIfNeeded()
             }
@@ -645,7 +659,6 @@ open class TextView: UIScrollView {
     }
     private var hasPendingContentSizeUpdate = false
     private var isInputAccessoryViewEnabled = false
-    private let keyboardObserver = KeyboardObserver()
     private let highlightNavigationController = HighlightNavigationController()
     private var textSearchingHelper = UITextSearchingHelper()
     private var preferredContentSize: CGSize {
@@ -673,7 +686,6 @@ open class TextView: UIScrollView {
         tapGestureRecognizer.addTarget(self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tapGestureRecognizer)
         installNonEditableInteraction()
-        keyboardObserver.delegate = self
         highlightNavigationController.delegate = self
         textSearchingHelper.textView = self
         accessibilityTextInputResponder = textInputView
@@ -689,12 +701,24 @@ open class TextView: UIScrollView {
 
     /// Lays out subviews.
     override open func layoutSubviews() {
+        let previousViewport = textInputView.viewport
+        let keepCaretVisible = previousViewport.size != bounds.size
+            && textInputView.isFirstResponder
+            && isAutomaticScrollEnabled
+            && selectedRange.length == 0
+            && previousViewport.intersects(caretRect(atCharacterIndex: selectedRange.location))
         super.layoutSubviews()
+        // Resizing also changes the overscroll extent, even when no text
+        // or wrapping width changed. Reconcile it at the layout boundary.
+        if contentSize != preferredContentSize { hasPendingContentSizeUpdate = true }
         handleContentSizeUpdateIfNeeded()
         textInputView.scrollViewWidth = frame.width
         textInputView.frame = CGRect(x: 0, y: 0, width: max(contentSize.width, frame.width), height: max(contentSize.height, frame.height))
         textInputView.viewport = CGRect(origin: contentOffset, size: frame.size)
         bringSubviewToFront(textInputView.gutterContainerView)
+        // Keyboard avoidance and window resizing happen after keyboard-will-show.
+        // Follow a visible insertion point using the final viewport geometry.
+        if keepCaretVisible { scrollRangeToVisible(selectedRange) }
     }
 
     /// Called when the safe area of the view changes.
@@ -1457,8 +1481,9 @@ extension TextView: TextInputViewDelegate {
         editorDelegate?.textViewDidEndEditing(self)
     }
 
-    func textInputViewDidChange(_ view: TextInputView) {
+    func textInputViewDidChange(_ view: TextInputView, replacing range: NSRange, withText text: String) {
         textGeneration &+= 1
+        editorDelegate?.textView(self, didReplaceTextIn: range, replacementText: text)
         if isAutomaticScrollEnabled, let newRange = textInputView.selectedRange, newRange.length == 0 {
             scrollLocationToVisible(newRange.location)
         }
@@ -1578,17 +1603,6 @@ extension TextView: UIGestureRecognizerDelegate {
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                   shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         return gestureRecognizer !== panGestureRecognizer
-    }
-}
-
-// MARK: - KeyboardObserverDelegate
-extension TextView: KeyboardObserverDelegate {
-    func keyboardObserver(_ keyboardObserver: KeyboardObserver,
-                          keyboardWillShowWithHeight keyboardHeight: CGFloat,
-                          animation: KeyboardObserver.Animation?) {
-        if isAutomaticScrollEnabled, let newRange = textInputView.selectedRange, newRange.length == 0 {
-            scrollRangeToVisible(newRange)
-        }
     }
 }
 

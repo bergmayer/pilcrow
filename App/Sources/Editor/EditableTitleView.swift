@@ -137,18 +137,12 @@ struct EditableTitleView: View {
         } label: {
             Label("Save As…", systemImage: "square.and.arrow.down")
         }
-        // Save as Draft keeps the edits in the unsaved-drafts list
-        // without writing to a file — useful for an untitled buffer
-        // when the user wants to switch tasks but isn't ready to
-        // pick a filename. Hidden for clean URL-backed docs since
-        // there's nothing to park.
-        if currentTab?.document.isDirty == true || currentFileURL == nil {
-            Button {
-                onInteraction?()
-                CommandActions.saveAsDraft()
-            } label: {
-                Label("Save as Draft", systemImage: "doc.badge.clock")
-            }
+        Menu {
+            Button("Share Text…") { onInteraction?(); CommandActions.shareText() }
+            Button("Share File…") { onInteraction?(); CommandActions.shareFile() }
+        } label: { Label("Share", systemImage: "square.and.arrow.up") }
+        Button { onInteraction?(); CommandActions.printDocument() } label: {
+            Label("Print…", systemImage: "printer")
         }
         Button {
             onInteraction?()

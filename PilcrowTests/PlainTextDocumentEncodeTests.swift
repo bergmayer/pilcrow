@@ -478,19 +478,20 @@ final class EditorSafetyRegressionTests: XCTestCase {
     func test_copyAllCopiesFrontmostDocumentBuffer() {
         let context = TestCommandContext()
         let session = EditorSession()
+        session.activeTab.kind = .editor
         session.activeTab.document.text = "entire document"
         context.scenes.registerSession(session)
         context.scenes.claimFocus(session: session)
         CommandActions.context = context
-        let priorClipboard = UIPasteboard.general.string
+        let pasteboard = UIPasteboard.withUniqueName()
         defer {
-            UIPasteboard.general.string = priorClipboard
+            UIPasteboard.remove(withName: pasteboard.name)
             CommandActions.context = AppStateBus.shared
         }
 
-        CommandActions.copyAll()
+        CommandActions.copyAll(to: pasteboard)
 
-        XCTAssertEqual(UIPasteboard.general.string, "entire document")
+        XCTAssertEqual(pasteboard.string, "entire document")
     }
 
     func test_queryReplace_findsLastLiteralInRange() throws {
@@ -531,7 +532,7 @@ final class EditorSafetyRegressionTests: XCTestCase {
         XCTAssertEqual(match.replacement, "b1")
     }
 
-    func test_saveFormattingKeepsBufferAndDiskIdentical() throws {
+    func test_saveFormattingKeepsBufferAndDiskIdentical() async throws {
         let defaults = UserDefaults.standard
         let trimKey = AppPreferenceKey.trimTrailingWhitespaceOnSave
         let newlineKey = AppPreferenceKey.ensureTrailingNewline
@@ -544,7 +545,8 @@ final class EditorSafetyRegressionTests: XCTestCase {
         defaults.set(true, forKey: trimKey)
         defaults.set(true, forKey: newlineKey)
 
-        let document = PlainTextDocument()
+        let tab = TabModel()
+        let document = tab.document
         document.text = "first   \r\nsecond\t"
         document.lineEnding = .lf
         document.fileEncoding = .utf8
@@ -552,7 +554,7 @@ final class EditorSafetyRegressionTests: XCTestCase {
             .appendingPathComponent("pilcrow-save-fidelity-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: url) }
 
-        try document.save(to: url)
+        try await DocumentWorkflow.save(tab, to: url)
         let diskText = try String(contentsOf: url, encoding: .utf8)
         XCTAssertEqual(document.text, diskText)
         XCTAssertEqual(diskText, "first\nsecond\n")
@@ -596,5 +598,4 @@ private final class TestCommandContext: CommandContext {
     var scenes = SceneRouter()
     var pickers = PickerIntents()
     var presentation = PresentationState()
-    var pending = PendingURLs()
 }

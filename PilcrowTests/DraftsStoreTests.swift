@@ -26,6 +26,53 @@ final class DraftsStoreTests: XCTestCase {
 
     // MARK: - save / load round-trip
 
+    func test_failedCheckpointIsVisibleAndRetryPreservesExactBuffer() async throws {
+        let document = PlainTextDocument()
+        let other = PlainTextDocument()
+        let source = tempRoot.appendingPathComponent("source.txt")
+        try Data("original file".utf8).write(to: source)
+        document.fileURL = source
+        document.text = "first recovery"
+        document.isDirty = true
+        let scratch = try XCTUnwrap(ScratchStore.directory)
+            .appendingPathComponent(try XCTUnwrap(document.liveRecoveryFilenames.first))
+        let metadata = scratch.deletingPathExtension().appendingPathExtension("json")
+        defer { document.deleteScratchFile() }
+
+        await document.autoSave().value
+        XCTAssertNil(document.recoveryError)
+        // A directory at this unique fixture's metadata path forces a
+        // real atomic write failure without touching another document.
+        try FileManager.default.removeItem(at: metadata)
+        try FileManager.default.createDirectory(at: metadata, withIntermediateDirectories: false)
+        document.text = "newer 😀 work   \nno final newline"
+        await document.autoSave().value
+        XCTAssertNotNil(document.recoveryError)
+        XCTAssertNil(other.recoveryError, "Failures belong to their document")
+        XCTAssertEqual(try String(contentsOf: scratch, encoding: .utf8), "first recovery")
+        XCTAssertTrue(document.isDirty)
+
+        try FileManager.default.removeItem(at: metadata)
+        await document.autoSave().value
+        XCTAssertNil(document.recoveryError)
+        XCTAssertEqual(try String(contentsOf: scratch, encoding: .utf8), document.text)
+        XCTAssertEqual(try String(contentsOf: source, encoding: .utf8), "original file")
+    }
+
+    func test_discardInvalidatesQueuedCheckpointAndItsFailure() async throws {
+        let document = PlainTextDocument()
+        let scratch = try XCTUnwrap(ScratchStore.directory)
+            .appendingPathComponent(try XCTUnwrap(document.liveRecoveryFilenames.first))
+        let metadata = scratch.deletingPathExtension().appendingPathExtension("json")
+        try FileManager.default.createDirectory(at: metadata, withIntermediateDirectories: false)
+        document.text = "discard this fixture"
+        let pending = document.autoSave()
+        document.deleteScratchFile()
+        await pending.value
+        XCTAssertNil(document.recoveryError)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratch.path))
+    }
+
     func test_save_writesFileAndShowsUpInLoadAll() async throws {
         let url = try await store.save(text: "hello", existing: nil)
         let savedText = try await DraftsStore.readText(at: url)
@@ -55,7 +102,7 @@ final class DraftsStoreTests: XCTestCase {
         let draft = try XCTUnwrap(store.loadAll().first)
         let tab = TabModel()
 
-        let staleCheck = try await EditorScene.adoptDraft(draft, into: tab, store: store)
+        let staleCheck = try await DraftRecoveryWorkflow.adopt(draft, into: tab, store: store)
         XCTAssertNil(staleCheck)
 
         XCTAssertEqual(tab.document.text, "original")
@@ -80,10 +127,10 @@ final class DraftsStoreTests: XCTestCase {
         let draft = try XCTUnwrap(store.loadAll().first)
         let tab = TabModel()
 
-        let staleCheck = try await EditorScene.adoptDraft(draft, into: tab, store: store)
+        let staleCheck = try await DraftRecoveryWorkflow.adopt(draft, into: tab, store: store)
         XCTAssertNil(staleCheck)
         let savedURL = tempRoot.appendingPathComponent("saved.txt")
-        try tab.document.save(to: savedURL)
+        try await DocumentWorkflow.save(tab, to: savedURL)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: draftURL.path))
         XCTAssertNil(tab.document.draftURL)
@@ -215,7 +262,7 @@ final class DraftsStoreTests: XCTestCase {
         // A launcher row loaded just before migration still carries the old
         // URL. Adoption resolves the same filename at its new local path.
         let tab = TabModel()
-        _ = try await EditorScene.adoptDraft(
+        _ = try await DraftRecoveryWorkflow.adopt(
             discovered,
             into: tab,
             store: migrationStore
@@ -350,7 +397,7 @@ final class DraftsStoreTests: XCTestCase {
         XCTAssertEqual(draft.bytes, 0)
 
         let tab = TabModel()
-        _ = try await EditorScene.adoptDraft(draft, into: tab, store: store)
+        _ = try await DraftRecoveryWorkflow.adopt(draft, into: tab, store: store)
         XCTAssertEqual(tab.document.text, "")
         XCTAssertTrue(tab.document.isDirty, "Deleting all source text is a recoverable edit")
     }
@@ -364,7 +411,7 @@ final class DraftsStoreTests: XCTestCase {
         tab.state.text = "keep me"
 
         do {
-            _ = try await EditorScene.adoptDraft(draft, into: tab, store: store)
+            _ = try await DraftRecoveryWorkflow.adopt(draft, into: tab, store: store)
             XCTFail("Expected invalid UTF-8 to fail recovery")
         } catch DraftRecoveryFailure.invalidUTF8 {
             // Expected.

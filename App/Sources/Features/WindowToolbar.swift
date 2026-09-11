@@ -11,7 +11,9 @@ import SwiftUI
 /// bar + custom toolbar). Overflow folds into a trailing `+` menu.
 struct WindowToolbar: View {
 
-    let title: String
+    /// Nil on the start screen or file browser, where there is no
+    /// document title to rename or save yet.
+    let title: String?
     let subtitle: String
     /// Claims focus on the bus before any toolbar action fires, so
     /// a stale `currentEditor` doesn't land sheets / pickers in the
@@ -34,10 +36,16 @@ struct WindowToolbar: View {
     /// Keeps the last visible item from butting against the `+`.
     private static let overflowSlot: CGFloat = touchTarget + buttonSpacing
 
-    init(title: String, subtitle: String, onInteraction: (() -> Void)? = nil) {
+    let onToggleSidebar: () -> Void
+
+    init(
+        title: String?, subtitle: String, onInteraction: (() -> Void)? = nil,
+        onToggleSidebar: @escaping () -> Void = { CommandActions.toggleSidebar() }
+    ) {
         self.title = title
         self.subtitle = subtitle
         self.onInteraction = onInteraction
+        self.onToggleSidebar = onToggleSidebar
     }
 
     var body: some View {
@@ -55,9 +63,7 @@ struct WindowToolbar: View {
             // every slot into the overflow.
             let compact = proxy.size.width < 600
             if compact {
-                compactBody(proxy: proxy,
-                            stoplightInset: stoplightInset,
-                            trailingZone: trailingZone)
+                compactBody(stoplightInset: stoplightInset)
             } else {
                 regularBody(proxy: proxy,
                             stoplightInset: stoplightInset,
@@ -108,32 +114,32 @@ struct WindowToolbar: View {
     /// Narrow / Split-View / Stage-Manager-skinny — drops the pill;
     /// every slot folds into a single trailing-edge overflow menu.
     @ViewBuilder
-    private func compactBody(
-        proxy: GeometryProxy,
-        stoplightInset: CGFloat,
-        trailingZone: CGFloat
-    ) -> some View {
-        // No stoplight chrome in compact widths — system chrome
-        // collapses to a single icon.
-        let compactLeading: CGFloat = 8
+    private func compactBody(stoplightInset: CGFloat) -> some View {
+        // Narrow floating windows still have native window controls. Keep
+        // their inset and move the sidebar action into the overflow so the
+        // document title has room beside Undo, Redo, and the palette.
         HStack(spacing: 6) {
-            sidebarButton
-                .padding(.leading, compactLeading)
             titleBlock
                 .layoutPriority(1)
             Spacer(minLength: 0)
-            if !config.slots.isEmpty {
-                compactOverflowMenu
-            }
+            compactOverflowMenu
             trailingControls
                 .padding(.trailing, Self.outerPadding)
         }
+        .padding(.leading, stoplightInset)
         .padding(.vertical, Self.verticalPadding)
     }
 
     @ViewBuilder
     private var compactOverflowMenu: some View {
         Menu {
+            Button {
+                onInteraction?()
+                onToggleSidebar()
+            } label: {
+                Label("Toggle Sidebar", systemImage: "sidebar.left")
+            }
+            Divider()
             ForEach(Array(config.slots.enumerated()), id: \.element.id) { _, slot in
                 if let cmd = CommandRegistry.lookup(id: slot.commandId) {
                     Button {
@@ -160,67 +166,47 @@ struct WindowToolbar: View {
     /// the iPhone nav-bar principal item via `EditableTitleView`.
     @ViewBuilder
     private var titleBlock: some View {
-        EditableTitleView(
-            title: title,
-            subtitle: subtitle,
-            titleFont: .system(size: Self.buttonSize * 0.45, weight: .semibold),
-            subtitleFont: .caption,
-            maxRenameWidth: 280,
-            // Same per-window focus claim as the toolbar buttons —
-            // without this, title-tap Save As lands in whichever
-            // window `currentEditor` happens to point at.
-            onInteraction: onInteraction
-        )
+        if let title {
+            EditableTitleView(
+                title: title,
+                subtitle: subtitle,
+                titleFont: .system(size: Self.buttonSize * 0.45, weight: .semibold),
+                subtitleFont: .caption,
+                maxRenameWidth: 280,
+                // Same per-window focus claim as the toolbar buttons —
+                // without this, title-tap Save As lands in whichever
+                // window `currentEditor` happens to point at.
+                onInteraction: onInteraction
+            )
+            .accessibilityIdentifier("window-document-title")
+        } else {
+            Text("Pilcrow")
+                .font(.system(size: Self.buttonSize * 0.45, weight: .semibold))
+        }
     }
 
     @ViewBuilder
     private var sidebarButton: some View {
         bareButton(symbol: "sidebar.left", help: "Toggle Sidebar") {
-            CommandActions.toggleSidebar()
+            onToggleSidebar()
         }
     }
 
-    /// Undo + New Tab + Command Palette — chrome, not customizable.
-    /// New Tab sits between undo and the palette so the muscle-memory
-    /// undo location stays put while the most-used "spawn a tab"
-    /// affordance is one tap from the right edge.
+    /// Undo and Command Palette stay available beside the custom tools.
+    /// New Tab and Tab Overview live together in the persistent tab strip.
     @ViewBuilder
     private var trailingControls: some View {
         HStack(spacing: Self.buttonSpacing) {
             bareButton(symbol: "arrow.uturn.backward", help: "Undo") {
                 CommandActions.undo()
             }
-            newDocumentButton
+            bareButton(symbol: "arrow.uturn.forward", help: "Redo") {
+                CommandActions.redo()
+            }
             bareButton(symbol: "command.square", help: "Command Palette") {
                 CommandActions.presentCommandPalette()
             }
         }
-    }
-
-    /// Tap creates a blank tab; press-and-hold exposes the explicit
-    /// template path without slowing down the common New action.
-    @ViewBuilder
-    private var newDocumentButton: some View {
-        Menu {
-            Button {
-                onInteraction?()
-                CommandActions.newFromTemplate()
-            } label: {
-                Label("New from Template…", systemImage: "doc.badge.plus")
-            }
-        } label: {
-            Image(systemName: "plus.square")
-                .font(.system(size: Self.buttonSize * 0.5, weight: .regular))
-                .symbolRenderingMode(.hierarchical)
-                .frame(width: Self.touchTarget, height: Self.touchTarget)
-                .contentShape(.rect)
-        } primaryAction: {
-            onInteraction?()
-            CommandActions.newTab()
-        }
-        .menuStyle(.borderlessButton)
-        .help("New")
-        .accessibilityLabel("New")
     }
 
     @ViewBuilder
@@ -345,6 +331,7 @@ private struct ToolbarSlotButton: View {
         .opacity(isEnabled ? 1 : 0.4)
         .disabled(!isEnabled)
         .help(command?.title ?? slot.commandId)
+        .accessibilityLabel(command?.title ?? slot.commandId)
         // Long-press opens the per-slot editor. Settings ▸ Toolbar
         // is the canonical customization UI.
         .simultaneousGesture(

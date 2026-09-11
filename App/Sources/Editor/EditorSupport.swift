@@ -254,7 +254,7 @@ enum MarkdownListContinuation {
             let body = String(rest[m])
             // Extract the number, increment.
             let digits = body.prefix { $0.isNumber }
-            if let n = Int(digits) {
+            if let n = Int(digits), n < Int.max {
                 let punct = body.dropFirst(digits.count).prefix(1)
                 return Marker(leading: leading, body: body, next: "\(n + 1)\(punct) ")
             }
@@ -273,6 +273,88 @@ enum MarkdownListContinuation {
 /// error handling work performed by another.
 @MainActor
 enum DocumentWorkflow {
+    /// The native buffer remains editable while file-provider access waits.
+    /// Commit only to the same document generation, retaining newer edits.
+    static func save(_ tab: TabModel, to url: URL? = nil, overwrite: Bool = false) async throws {
+        let document = tab.document
+        guard let destination = url ?? document.fileURL else { throw PlainTextDocument.DocumentError.noFileURL }
+        guard !document.isSaving else { throw PlainTextDocument.DocumentError.saveInProgress }
+        document.isSaving = true
+        defer { document.isSaving = false }
+        let generation = tab.state.loadGeneration
+        let originalURL = document.fileURL
+        let input = tab.state.textView?.text ?? document.text
+        let saved = try await document.writeSnapshot(to: destination, text: input, overwrite: overwrite)
+        guard tab.state.loadGeneration == generation, document.fileURL == originalURL else {
+            throw CancellationError()
+        }
+        adoptSavedSnapshot(saved, into: tab)
+    }
+
+    static func adoptSavedSnapshot(_ saved: PlainTextDocument.SavedSnapshot, into tab: TabModel) {
+        let document = tab.document
+        var current = tab.state.textView?.text ?? document.text
+        if current == saved.inputText {
+            if current != saved.text, let editor = tab.state.textView {
+                editor.replaceText(in: .init(replacements: [
+                    .init(range: NSRange(location: 0, length: current.utf16.count), text: saved.text)
+                ]))
+            }
+            current = saved.text
+        }
+        document.finishExternalSave(to: saved.url, savedText: saved.text, savedData: saved.data,
+            currentText: current, modificationDate: saved.modificationDate)
+        if document.fileEncoding != saved.encoding || document.lineEnding != saved.lineEnding {
+            document.isDirty = true
+            document.autoSave()
+        }
+        tab.state.text = current
+        tab.state.fileURL = saved.url
+        tab.state.savedBaselineText = saved.text
+    }
+
+
+    nonisolated static func insertionText(from url: URL, folder: Bool, lineEnding: String) async throws -> String {
+        try await CoordinatedFileAccess.perform(at: url) { source in
+            if !folder {
+                let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard size <= 5 * 1024 * 1024 else { throw InsertionError.fileTooLarge }
+                let data = try Data(contentsOf: source)
+                guard data.count <= 5 * 1024 * 1024 else { throw InsertionError.fileTooLarge }
+                return try PlainTextDocument.decodePayload(from: data).text
+            }
+            var enumerationError: (any Error)?
+            guard let enumerator = FileManager.default.enumerator(at: source,
+                includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsSubdirectoryDescendants],
+                errorHandler: { _, error in enumerationError = error; return false })
+            else { throw CocoaError(.fileReadUnknown) }
+            var entries: [(name: String, directory: Bool)] = []
+            for case let entry as URL in enumerator {
+                guard entries.count < 10_000 else { throw InsertionError.folderTooLarge }
+                let directory = try entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+                entries.append((entry.lastPathComponent, directory))
+            }
+            if let enumerationError { throw enumerationError }
+            entries.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            var lines = [source.lastPathComponent + "/"]
+            for (index, entry) in entries.enumerated() {
+                let branch = index == entries.count - 1 ? "└── " : "├── "
+                lines.append(branch + entry.name + (entry.directory ? "/" : ""))
+            }
+            return lines.joined(separator: lineEnding) + lineEnding
+        }
+    }
+
+    enum InsertionError: LocalizedError {
+        case fileTooLarge, folderTooLarge, documentChanged
+        var errorDescription: String? {
+            switch self {
+            case .fileTooLarge: "Files larger than 5 MB cannot be inserted."
+            case .folderTooLarge: "Folders with more than 10,000 entries cannot be inserted at once."
+            case .documentChanged: "The document or selection changed while the item was loading. Choose Insert again."
+            }
+        }
+    }
 
     /// Reloads the source and, only after a successful load, removes every
     /// recovery copy containing the edits the user explicitly discarded.
@@ -296,9 +378,6 @@ enum DocumentWorkflow {
         completion: (@MainActor (Result<Void, any Error>) -> Void)? = nil
     ) {
         let state = tab.state
-        let document = tab.document
-        let hadRenderableContent = document.fileURL != nil || !document.text.isEmpty
-
         tab.kind = .editor
         state.loadTask?.cancel()
         state.loadGeneration &+= 1
@@ -315,33 +394,25 @@ enum DocumentWorkflow {
             do {
                 try await document.loadAsync(from: url)
                 try Task.checkCancellation()
-            } catch is CancellationError {
-                return
             } catch {
-                if !hadRenderableContent {
-                    tab.kind = .editor
-                    document.fileURL = nil
-                    state.fileURL = nil
-                }
+                // Providers may report cancellation as a URL/Cocoa error.
+                // Only the request still owned by this tab may report it.
+                guard !Task.isCancelled, state.loadGeneration == generation else { return }
                 AppStateBus.shared.presentation.openErrorMessage =
                     "Couldn't open \(url.lastPathComponent): \(error.localizedDescription)"
                 completion?(.failure(error))
                 return
             }
 
-            applyLoadedDocument(document, at: url, to: state)
-            RecentFilesStore.shared.record(url)
+            let loadedURL = document.fileURL ?? url
+            applyLoadedDocument(document, at: loadedURL, to: state)
+            RecentFilesStore.shared.record(loadedURL)
 
-            let persisted = FoldPersistence.ranges(for: url)
-            if !persisted.isEmpty {
-                DispatchQueue.main.async { [weak state] in
-                    state?.textView?.applyFoldRanges(persisted)
-                }
-            }
-            if let goToLine {
-                DispatchQueue.main.async { [weak state] in
-                    state?.textView?.goToLine(goToLine)
-                }
+            let persisted = FoldPersistence.ranges(for: loadedURL)
+            DispatchQueue.main.async { [weak state] in
+                guard let state, state.loadGeneration == generation else { return }
+                state.textView?.applyFoldRanges(persisted)
+                if let goToLine { state.textView?.goToLine(goToLine) }
             }
             completion?(.success(()))
         }
@@ -362,5 +433,71 @@ enum DocumentWorkflow {
         state.fileEncoding = document.fileEncoding
         state.lineEnding = document.lineEnding
         state.requestEditorFocus()
+    }
+}
+
+/// A line operation targets the touched lines, excluding a following line when
+/// the selection ends at its start. With no selection, the scope is explicit.
+struct LineEditTarget {
+    let source: String
+    let range: NSRange
+    let isSelection: Bool
+    var text: String { (source as NSString).substring(with: range) }
+
+    init(text: String, selection: NSRange) {
+        source = text
+        let ns = text as NSString
+        let start = min(max(0, selection.location), ns.length)
+        let length = min(max(0, selection.length), ns.length - start)
+        isSelection = length > 0
+        range = isSelection
+            ? ns.lineRange(for: NSRange(location: start, length: max(0, length - 1)))
+            : NSRange(location: 0, length: ns.length)
+    }
+}
+
+struct WritingStatistics: Sendable {
+    struct Request: Equatable, Sendable {
+        let text: String
+        let selection: NSRange
+        let encoding: UInt
+        let utf8BOM: Bool
+    }
+
+    private let request: Request
+    let words: Int
+    let characters: Int
+    var hasSelection: Bool { request.selection.length > 0 }
+    let selectedWords: Int
+    let selectedCharacters: Int
+    let bufferBytes: Int?
+
+    init(_ request: Request, reusing previous: WritingStatistics? = nil) {
+        self.request = request
+        let unchanged = previous?.request.text == request.text
+            && previous?.request.encoding == request.encoding && previous?.request.utf8BOM == request.utf8BOM
+        words = unchanged ? (previous?.words ?? 0) : Self.wordCount(request.text)
+        characters = unchanged ? (previous?.characters ?? 0) : request.text.count
+        let ns = request.text as NSString
+        let start = min(max(0, request.selection.location), ns.length)
+        let length = min(max(0, request.selection.length), ns.length - start)
+        let selected = ns.substring(with: NSRange(location: start, length: length))
+        selectedWords = Self.wordCount(selected)
+        selectedCharacters = selected.count
+        let encoding = String.Encoding(rawValue: request.encoding)
+        if unchanged { bufferBytes = previous?.bufferBytes }
+        else {
+            let bytes = request.text.data(using: encoding, allowLossyConversion: false)?.count
+            bufferBytes = bytes.map { $0 + (encoding == .utf8 && request.utf8BOM ? 3 : 0) }
+        }
+    }
+
+    private static func wordCount(_ text: String) -> Int {
+        var count = 0
+        text.enumerateSubstrings(in: text.startIndex..., options: [.byWords, .substringNotRequired]) { _, _, _, stop in
+            if Task.isCancelled { stop = true; return }
+            count += 1
+        }
+        return count
     }
 }

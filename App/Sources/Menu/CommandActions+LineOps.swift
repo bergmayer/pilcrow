@@ -1,4 +1,5 @@
 import Foundation
+import struct EditorEngine.BatchReplaceSet
 
 extension CommandActions {
 
@@ -113,5 +114,37 @@ extension CommandActions {
     static func normalizeLineEndingsToDocument() {
         let ending = state?.lineEnding.string ?? "\n"
         applyToWholeText { Transformations.normalizeLineEndings($0, to: ending) }
+    }
+}
+
+@MainActor
+extension CommandActions {
+    static func toggleLineComment() {
+        guard let editor = actions, let state else { return }
+        let prefix = LanguageRegistry.lineComment(for: state.languageIdentifier)
+        guard !prefix.isEmpty else { return }
+        let source = editor.text as NSString
+        let selection = editor.selectedRange
+        let range = selection.length > 0
+            ? LineEditTarget(text: editor.text, selection: selection).range
+            : source.lineRange(for: selection)
+        let body = source.substring(with: range)
+        var lines: [(location: Int, content: String)] = []
+        body.enumerateSubstrings(in: body.startIndex..., options: .byLines) { substring, localRange, _, _ in
+            guard let substring else { return }
+            let indentation = substring.prefix { $0 == " " || $0 == "\t" }
+            let content = String(substring.dropFirst(indentation.count))
+            if !content.isEmpty {
+                lines.append((range.location + NSRange(localRange, in: body).location + indentation.utf16.count, content))
+            }
+        }
+        let remove = lines.allSatisfy { $0.content.hasPrefix(prefix) }
+        let edits = lines.map { line -> BatchReplaceSet.Replacement in
+            let length = remove ? prefix.utf16.count + (line.content.hasPrefix(prefix + " ") ? 1 : 0) : 0
+            return .init(range: NSRange(location: line.location, length: length), text: remove ? "" : prefix + " ")
+        }
+        editor.replaceText(in: BatchReplaceSet(replacements: edits))
+        let change = edits.reduce(0) { $0 + $1.text.utf16.count - $1.range.length }
+        editor.setSelection(NSRange(location: range.location, length: range.length + change))
     }
 }

@@ -3,8 +3,25 @@ import Foundation
 /// Data carried by a specific editor-window request. Unlike a process-global
 /// queue, SwiftUI delivers this value only to the scene created for it.
 enum EditorRoute: Codable, Hashable {
-    case newDocument
+    case newDocument(UUID = UUID())
+    case openDocument(URL, line: Int? = nil, requestID: UUID = UUID())
+    case moveTab(UUID)
+    case restoreSession(String)
     case restoreClosedWindow(UUID)
+}
+
+/// Each utility request records its owner and launch. Restored utility
+/// windows cannot consume a request meant for a new window.
+struct UtilityWindowRequest: Codable, Hashable {
+    let id: UUID
+    let launchID: String
+    let ownerSessionID: String?
+
+    init(launchID: String, ownerSessionID: String?) {
+        id = UUID()
+        self.launchID = launchID
+        self.ownerSessionID = ownerSessionID
+    }
 }
 
 @MainActor
@@ -19,6 +36,7 @@ final class SceneRouter {
     /// which can't be reached outside a View body.
     var openWindow: ((SceneID) -> Void)?
     var openEditorWindow: ((EditorRoute) -> Void)?
+    var openPreviewWindow: ((UUID) -> Void)?
 
     var pendingShortcut: HomeShortcut?
     var hasAppliedLaunchBehavior = false
@@ -58,22 +76,30 @@ final class SceneRouter {
     /// on the right scene.
     func claimFocus(session: EditorSession) {
         if currentSession !== session { currentSession = session }
-        let activeState = session.activeTab.state
-        if currentEditor !== activeState { currentEditor = activeState }
+        if !session.activeTab.owns(currentEditor) { currentEditor = session.activeTab.state }
     }
 
     func claimFocus(state: EditorState) {
         if currentEditor !== state { currentEditor = state }
-        if let session = currentSession, session.tabs.contains(where: { $0.state === state }) {
+        if let session = currentSession, session.tabs.contains(where: { $0.owns(state) }) {
             return
         }
-        for candidate in allOpenSessions where candidate.tabs.contains(where: { $0.state === state }) {
+        for candidate in allOpenSessions where candidate.tabs.contains(where: { $0.owns(state) }) {
             currentSession = candidate
             return
         }
         // Fail closed: a stale currentSession from another window would
         // route OR-gated sheets/pickers to the wrong scene.
         currentSession = nil
+    }
+
+    /// Window chrome preserves whichever split pane the user selected.
+    func claimFocus(preservingPaneOf state: EditorState) {
+        if let session = allOpenSessions.first(where: { $0.activeTab.owns(state) }) {
+            claimFocus(session: session)
+        } else {
+            claimFocus(state: state)
+        }
     }
 
     func session(containing tabID: UUID) -> EditorSession? {
@@ -87,23 +113,10 @@ final class SceneRouter {
     /// at each call site) is the difference between a one-line edit and
     /// dredging up every modifier when the focus model evolves.
     func isActive(_ state: EditorState) -> Bool {
-        currentEditor === state
+        currentEditor === state || currentEditor?.siblingState === state
     }
 
-    /// iOS has no `restorationBehavior(.disabled)`; palette / preview
-    /// scenes the system tries to restore would surface on cold
-    /// launch. Each user-initiated open registers here; the target
-    /// scene's `.onAppear` checks via `consumeOpen` and dismisses
-    /// itself if no request matched.
-    private var pendingPaletteOpens: Set<SceneID> = []
 
-    func requestOpenWindow(_ id: SceneID) {
-        pendingPaletteOpens.insert(id)
-    }
-
-    func consumeOpen(_ id: SceneID) -> Bool {
-        pendingPaletteOpens.remove(id) != nil
-    }
 }
 
 enum SceneID: String {

@@ -7,7 +7,7 @@ protocol TextInputViewDelegate: AnyObject {
     func textInputViewDidBeginEditing(_ view: TextInputView)
     func textInputViewDidEndEditing(_ view: TextInputView)
     func textInputViewDidCancelBeginEditing(_ view: TextInputView)
-    func textInputViewDidChange(_ view: TextInputView)
+    func textInputViewDidChange(_ view: TextInputView, replacing range: NSRange, withText text: String)
     func textInputViewDidChangeSelection(_ view: TextInputView)
     func textInputView(_ view: TextInputView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool
     func textInputViewDidInvalidateContentSize(_ view: TextInputView)
@@ -570,7 +570,7 @@ final class TextInputView: UIView, UITextInput {
     private let lineControllerFactory: LineControllerFactory
     private let lineControllerStorage: LineControllerStorage
     private let layoutManager: LayoutManager
-    private let timedUndoManager = TimedUndoManager()
+    var timedUndoManager = TimedUndoManager()
     private let indentController: IndentController
     private let lineMovementController: LineMovementController
     private let pageGuideController = PageGuideController()
@@ -1263,9 +1263,38 @@ extension TextInputView {
             textInputView.setStringWithUndoAction(oldString)
         }
         timedUndoManager.endUndoGrouping()
-        delegate?.textInputViewDidChange(self)
+        delegate?.textInputViewDidChange(self, replacing: NSRange(location: 0, length: oldString.length), withText: newString as String)
         if let oldSelectedRange = oldSelectedRange {
             selectedRange = safeSelectionRange(from: oldSelectedRange)
+        }
+    }
+
+    /// Mirror an accepted edit from another view of the same document.
+    /// Keep its raw line endings and the passive pane's selection. The
+    /// originating view has already registered the shared undo operation.
+    func applySynchronizedEdit(in range: NSRange, replacementText: String) {
+        let selection = selectedRange
+        let replacesBuffer = range == NSRange(location: 0, length: string.length)
+        let replacementEnd = range.location + replacementText.utf16.count
+        let delta = replacementText.utf16.count - range.length
+        func shifted(_ offset: Int) -> Int {
+            if offset <= range.location { return offset }
+            if offset >= range.upperBound { return offset + delta }
+            return replacementEnd
+        }
+        timedUndoManager.disableUndoRegistration()
+        defer { timedUndoManager.enableUndoRegistration() }
+        replaceText(in: range, with: replacementText)
+        if let selection {
+            // Batch operations use setStringWithUndoAction, which retains
+            // absolute selection offsets. Give the passive pane the same policy.
+            if replacesBuffer {
+                selectedRange = safeSelectionRange(from: selection)
+                return
+            }
+            let start = shifted(selection.location)
+            let end = shifted(selection.upperBound)
+            selectedRange = safeSelectionRange(from: NSRange(location: start, length: max(0, end - start)))
         }
     }
 
@@ -1310,7 +1339,7 @@ extension TextInputView {
         lineChangeSet.union(with: languageModeLineChangeSet)
         applyLineChangesToLayoutManager(lineChangeSet)
         let updatedTextEditResult = TextEditResult(textChange: textChange, lineChangeSet: lineChangeSet)
-        delegate?.textInputViewDidChange(self)
+        delegate?.textInputViewDidChange(self, replacing: range, withText: newString)
         if updatedTextEditResult.didAddOrRemoveLines {
             delegate?.textInputViewDidInvalidateContentSize(self)
         }
@@ -1342,6 +1371,7 @@ extension TextInputView {
                                   withText text: String,
                                   selectedRangeAfterUndo: NSRange? = nil,
                                   actionName: String = L10n.Undo.ActionName.typing) {
+        guard timedUndoManager.isUndoRegistrationEnabled else { return }
         let oldSelectedRange = selectedRangeAfterUndo ?? selectedRange
         timedUndoManager.beginUndoGrouping()
         timedUndoManager.setActionName(actionName)

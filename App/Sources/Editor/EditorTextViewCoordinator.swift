@@ -57,6 +57,10 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
         self.state = state
     }
 
+    func textViewDidBeginEditing(_ textView: EditorEngine.TextView) {
+        AppStateBus.shared.scenes.claimFocus(state: state)
+    }
+
     func textViewDidChange(_ textView: EditorEngine.TextView) {
         if isApplyingSiblingSync { return }
         // This is the authoritative mutation callback. Undo/redo,
@@ -69,24 +73,45 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
         refreshFoldableRegions(textView)
     }
 
+    func textView(
+        _ textView: EditorEngine.TextView,
+        didReplaceTextIn range: NSRange,
+        replacementText text: String
+    ) {
+        guard !isApplyingSiblingSync,
+              let sibling = state.siblingState?.textView,
+              let coordinator = sibling.editorDelegate as? EditorTextViewCoordinator else { return }
+        coordinator.isApplyingSiblingSync = true
+        defer { coordinator.isApplyingSiblingSync = false }
+        sibling.applySynchronizedEdit(in: range, replacementText: text)
+        coordinator.foldCacheKey = nil
+        coordinator.refreshFoldableRegions(sibling)
+    }
+
     /// Window matches the change-history overlay so both refresh
     /// in the same render pass.
     private func scheduleBufferSnapshot(from textView: EditorEngine.TextView) {
         bufferSnapshotTask?.cancel()
-        bufferSnapshotTask = Task { @MainActor [weak document, weak state, weak self] in
+        bufferSnapshotTask = Task { @MainActor [weak self, weak textView] in
             try? await Task.sleep(for: Timing.changeHistoryOverlayDebounce)
-            if Task.isCancelled { return }
-            guard let document, let state, let self else { return }
-            let snapshot = textView.text
-            if document.text != snapshot {
-                document.text = snapshot
-                // Match so the next updateUIView doesn't push
-                // this snapshot back at us.
-                self.lastPushedDocumentText = snapshot
-            }
-            if state.text != snapshot {
-                state.text = snapshot
-            }
+            guard !Task.isCancelled, let self, let textView else { return }
+            flushBufferSnapshot(from: textView)
+        }
+    }
+
+    /// Commit before unmounting or replacing the engine. An obsolete view
+    /// must not overwrite a newer load, restore, or mounted editor.
+    func flushBufferSnapshot(from textView: EditorEngine.TextView) {
+        bufferSnapshotTask?.cancel()
+        bufferSnapshotTask = nil
+        guard state.textView === textView,
+              lastPushedDocumentText == document.text else { return }
+        let snapshot = textView.text
+        lastPushedDocumentText = snapshot
+        if document.text != snapshot { document.text = snapshot }
+        if state.text != snapshot { state.text = snapshot }
+        if state.selectedRange != textView.selectedRange {
+            state.selectedRange = textView.selectedRange
         }
     }
 
@@ -128,7 +153,10 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
     }
 
     func textViewDidChangeSelection(_ textView: EditorEngine.TextView) {
-        state.selectedRange = textView.selectedRange
+        if state.lastFindSelection?.range != textView.selectedRange { state.lastFindSelection = nil }
+        if state.selectedRange != textView.selectedRange {
+            state.selectedRange = textView.selectedRange
+        }
         guard let textView = textView as? PilcrowTextView else { return }
         if state.highlightMatchingBrackets {
             textView.refreshBracketMatchHighlight()
@@ -197,8 +225,8 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
 
     weak var matchScrollOverlay: MatchScrollMarksOverlay?
 
-    /// Per-edit: armed modifier → dirty flag → sibling sync →
-    /// list-continuation interceptor on Enter. The interceptor's
+    /// Interpret accessory modifiers and list continuation before the
+    /// engine edits. Sibling panes receive only the completed edit. The interceptor's
     /// `false` return skips the engine's bare `\n` insert when
     /// the helper has already handled the newline.
     func textView(
@@ -206,8 +234,6 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
         shouldChangeTextIn range: NSRange,
         replacementText text: String
     ) -> Bool {
-        if isApplyingSiblingSync { return true }
-
         // Armed accessory modifier wins over the literal
         // keystroke. `handleArmedKey` disarms before dispatching —
         // armed actions can re-enter this delegate via `replace`.
@@ -220,18 +246,6 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
             if AccessoryKeyboard.handleArmedKey(text, state: state) {
                 return false
             }
-        }
-
-        // Sibling sync reaches the sibling coordinator to arm its
-        // recursion guard. Gated on the sibling view
-        // existing, not `splitOpen` — that flag only lives on the
-        // primary pane's state, so the secondary pane would skip
-        // syncing its edits back.
-        if let sibling = state.siblingState?.textView,
-           let siblingCoord = sibling.editorDelegate as? EditorTextViewCoordinator {
-            siblingCoord.isApplyingSiblingSync = true
-            sibling.replace(range, withText: text)
-            siblingCoord.isApplyingSiblingSync = false
         }
 
         // 3. List continuation interceptor.

@@ -76,14 +76,76 @@ final class SessionsStoreTests: XCTestCase {
 
     // MARK: - tab insertion
 
-    func test_newSessionStartsWithBlankEditor() {
+    func test_newWindowAndTabContentPreferencesAreIndependent() {
+        let prefs = AppPreferencesStore.shared
+        let oldWindow = prefs.newWindowContent
+        let oldTab = prefs.newTabContent
+        defer {
+            prefs.newWindowContent = oldWindow
+            prefs.newTabContent = oldTab
+        }
+        for windowContent in NewDocumentContent.allCases {
+            for tabContent in NewDocumentContent.allCases {
+                prefs.newWindowContent = windowContent
+                prefs.newTabContent = tabContent
+                let session = EditorSession()
+                let initial = session.activeTab
+                XCTAssertEqual(initial.kind, windowContent.tabKind)
+                let added = session.newTab()
+                XCTAssertEqual(added.kind, tabContent.tabKind)
+                XCTAssertEqual(initial.kind, windowContent.tabKind)
+                XCTAssertEqual(session.tabs.count, 2)
+                XCTAssertEqual(session.selectedTabID, added.id)
+                XCTAssertEqual(session.unsavedDocumentCount, 0)
+                XCTAssertEqual(
+                    UserDefaults.standard.string(forKey: AppPreferenceKey.newWindowContent), windowContent.rawValue)
+                XCTAssertEqual(
+                    UserDefaults.standard.string(forKey: AppPreferenceKey.newTabContent), tabContent.rawValue)
+            }
+        }
+    }
+
+    func test_changingNewContentDefaultsPreservesOpenDocumentsAndLastTabStartPage() {
+        let prefs = AppPreferencesStore.shared
+        let oldWindow = prefs.newWindowContent
+        let oldTab = prefs.newTabContent
+        defer {
+            prefs.newWindowContent = oldWindow
+            prefs.newTabContent = oldTab
+        }
+        prefs.newWindowContent = .startPage
+        prefs.newTabContent = .startPage
+        let session = EditorSession()
+        let initial = session.activeTab
+        initial.startDocument()
+        initial.document.text = "Keep this document"
+        prefs.newWindowContent = .blankDocument
+        prefs.newTabContent = .blankDocument
+        XCTAssertTrue(session.activeTab === initial)
+        XCTAssertEqual(initial.kind, .editor)
+        XCTAssertEqual(initial.document.text, "Keep this document")
+        session.closeTab(initial.id, disposition: .discard)
+        XCTAssertEqual(session.activeTab.kind, .launcher, "Closing the last tab still returns to the start page")
+    }
+
+    func test_explicitDocumentAndFileBrowserCreationIgnoreStartPageDefault() {
+        let prefs = AppPreferencesStore.shared
+        let oldTab = prefs.newTabContent
+        defer { prefs.newTabContent = oldTab }
+        prefs.newTabContent = .startPage
+        let session = EditorSession()
+        XCTAssertEqual(session.newTab(kind: .editor).kind, .editor)
+        XCTAssertEqual(session.newFileBrowserTab().kind, .fileBrowser)
+    }
+
+    func test_newSessionStartsWithLauncher() {
         let session = EditorSession()
 
         XCTAssertEqual(session.tabs.count, 1)
-        if case .editor = session.activeTab.kind {
+        if case .launcher = session.activeTab.kind {
             // Expected.
         } else {
-            XCTFail("A new window should start with a blank editor")
+            XCTFail("A new window should offer document creation and recovery")
         }
         XCTAssertEqual(session.activeTab.document.text, "")
         XCTAssertNil(session.activeTab.document.fileURL)
@@ -110,18 +172,90 @@ final class SessionsStoreTests: XCTestCase {
         }
     }
 
-    func test_closingLastTabLeavesBlankEditor() {
+    func test_closingLastTabReturnsToLauncher() {
         let session = EditorSession()
         let original = session.activeTab
+        original.startDocument()
 
         XCTAssertTrue(session.closeTab(original.id, disposition: .discard))
         XCTAssertEqual(session.tabs.count, 1)
         XCTAssertNotEqual(session.activeTab.id, original.id)
-        if case .editor = session.activeTab.kind {
+        if case .launcher = session.activeTab.kind {
             // Expected.
         } else {
-            XCTFail("Closing the last tab should leave a blank editor")
+            XCTFail("Closing the last tab should return to the window's start screen")
         }
+        XCTAssertEqual(session.unsavedDocumentCount, 0)
+    }
+
+    func test_closingLastTabFromOverviewReturnsOnlyItsOwnWindowToLauncher() {
+        let session = EditorSession()
+        let otherWindow = EditorSession()
+        session.activeTab.startDocument()
+        session.tabSwitcherActive = true
+        otherWindow.tabSwitcherActive = true
+
+        XCTAssertTrue(session.closeTab(session.selectedTabID))
+
+        XCTAssertFalse(session.tabSwitcherActive)
+        XCTAssertTrue(otherWindow.tabSwitcherActive)
+        XCTAssertEqual(session.activeTab.kind, .launcher)
+    }
+
+    func test_closingNonfinalTabKeepsTheRemainingEditor() {
+        let session = EditorSession()
+        let first = session.activeTab
+        first.startDocument()
+        let second = session.newTab()
+        session.tabSwitcherActive = true
+
+        XCTAssertTrue(session.closeTab(second.id, disposition: .discard))
+
+        XCTAssertTrue(session.activeTab === first)
+        XCTAssertEqual(session.activeTab.kind, .editor)
+        XCTAssertTrue(session.tabSwitcherActive)
+    }
+
+    func test_launcherCreationPreservesItsTabAndCheckpointsSeededText() async throws {
+        let session = EditorSession()
+        let tab = session.activeTab
+        let exact = "Clipboard 😀 text   \nno forced newline"
+        let scratch = try XCTUnwrap(ScratchStore.directory)
+            .appendingPathComponent(try XCTUnwrap(tab.document.liveRecoveryFilenames.first))
+        defer { tab.document.deleteScratchFile() }
+
+        tab.startDocument(with: exact)
+
+        XCTAssertTrue(session.activeTab === tab)
+        XCTAssertEqual(session.tabs.count, 1)
+        XCTAssertEqual(tab.kind, .editor)
+        XCTAssertEqual(tab.document.text, exact)
+        XCTAssertEqual(tab.state.text, exact)
+        XCTAssertTrue(tab.document.isDirty)
+        XCTAssertNil(tab.document.fileURL)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !FileManager.default.fileExists(atPath: scratch.path), clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(try String(contentsOf: scratch, encoding: .utf8), exact)
+    }
+
+    func test_unreadableTemplateKeepsLauncherRecoverable() {
+        let session = EditorSession()
+        let tab = session.activeTab
+        let previousError = AppStateBus.shared.presentation.openErrorMessage
+        defer { AppStateBus.shared.presentation.openErrorMessage = previousError }
+        let template = TemplateRecord(
+            url: FileManager.default.temporaryDirectory.appendingPathComponent("missing-\(UUID()).txt"),
+            displayName: "Missing template", symbol: "doc"
+        )
+
+        TemplateWorkflow.apply(template, to: tab)
+
+        XCTAssertEqual(tab.kind, .launcher)
+        XCTAssertFalse(tab.document.isDirty)
+        XCTAssertNotNil(AppStateBus.shared.presentation.openErrorMessage)
     }
 
     func test_newTab_afterPinnedSelection_preservesPinnedBlock() {
@@ -253,6 +387,17 @@ final class SessionsStoreTests: XCTestCase {
         XCTAssertNil(store.consumePendingRestore())
     }
 
+    func test_keyedRestorationCanArriveOutOfOrderAndIsConsumedOnce() {
+        store.save(makeRecord(sceneUUID: "A", launchID: "previous", lastModified: Date(timeIntervalSince1970: 100)))
+        store.save(makeRecord(sceneUUID: "B", launchID: "previous", lastModified: Date(timeIntervalSince1970: 200)))
+        _ = store.initiateRestoreSweep()
+        XCTAssertEqual(store.consumePendingRestore(sceneUUID: "B")?.sceneUUID, "B")
+        XCTAssertNil(store.consumePendingRestore(sceneUUID: "B"))
+        XCTAssertEqual(store.pendingRestoreSceneIDs, ["A"])
+        XCTAssertEqual(store.consumePendingRestore(sceneUUID: "A")?.sceneUUID, "A")
+        XCTAssertTrue(store.pendingRestoreSceneIDs.isEmpty)
+    }
+
     func test_initiateRestoreSweep_picksMostRecentPriorLaunchOnly() {
         // Two prior launches' records coexist. The sweep should restore
         // only the most recent prior launch's set.
@@ -263,16 +408,13 @@ final class SessionsStoreTests: XCTestCase {
         store.save(makeRecord(sceneUUID: "scene-recent-2", launchID: "L_recent",
                               lastModified: Date(timeIntervalSince1970: 600)))
         XCTAssertEqual(store.initiateRestoreSweep(), 2,
-                       "Only L_recent records get restored; L_old stays dormant")
+                       "Only L_recent records get restored; older metadata is retired")
         let drained = (0..<2).compactMap { _ in store.consumePendingRestore()?.sceneUUID }
         XCTAssertEqual(Set(drained), ["scene-recent-1", "scene-recent-2"])
-    }
-
-    // MARK: - consumeOpen (palette/multi-scene gating)
-
-    func test_consumeOpen_isRouterAPI_butLivesInSceneRouterTests() {
-        // Documenting that consumeOpen is on SceneRouter, not SessionsStore.
-        // Left here intentionally as a breadcrumb for future readers.
+        for scene in drained { store.remove(forScene: scene) }
+        let nextLaunch = SessionsStore(defaults: defaults, observesScenes: false)
+        XCTAssertEqual(nextLaunch.initiateRestoreSweep(), 0,
+            "Closing the last restored window must not resurrect an older launch")
     }
 
     func test_sessionRestore_loadsBookmarkedSource() async throws {
@@ -336,7 +478,6 @@ final class SessionsStoreTests: XCTestCase {
             removeClosedTab: { _ in }
         )
         let archived = try XCTUnwrap(closed.archive(record))
-        XCTAssertEqual(closed.pendingNotice?.id, archived.id)
         XCTAssertEqual(archived.dirtyTabCount, 1)
         XCTAssertEqual(archived.tabCount, 2)
 
@@ -348,7 +489,6 @@ final class SessionsStoreTests: XCTestCase {
         XCTAssertEqual(fresh.records.count, 1)
         XCTAssertEqual(fresh.records.first?.id, archived.id)
         XCTAssertEqual(fresh.records.first?.sourcePersistentIdentifier, "pid-dirty")
-        XCTAssertNil(fresh.pendingNotice, "Transient banner state is not persisted")
     }
 
     func test_closedWindow_sessionRecordRehomesArchiveIntoNewScene() {
@@ -674,44 +814,5 @@ final class SessionsStoreTests: XCTestCase {
             launchID: launchID,
             persistentIdentifier: persistentIdentifier
         )
-    }
-}
-
-final class WindowKeyboardGeometryTests: XCTestCase {
-
-    func test_dockedKeyboardReturnsOnlyItsWindowOverlap() {
-        let overlap = WindowKeyboardGeometry.bottomOverlap(
-            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 700),
-            keyboardFrame: CGRect(x: -200, y: 520, width: 1_400, height: 380)
-        )
-
-        XCTAssertEqual(overlap, 180)
-    }
-
-    func test_keyboardBelowWindowDoesNotMoveStatusBar() {
-        let overlap = WindowKeyboardGeometry.bottomOverlap(
-            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 500),
-            keyboardFrame: CGRect(x: -200, y: 520, width: 1_400, height: 380)
-        )
-
-        XCTAssertEqual(overlap, 0)
-    }
-
-    func test_floatingKeyboardDoesNotMoveFullWidthStatusBar() {
-        let overlap = WindowKeyboardGeometry.bottomOverlap(
-            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 700),
-            keyboardFrame: CGRect(x: 560, y: 430, width: 300, height: 270)
-        )
-
-        XCTAssertEqual(overlap, 0)
-    }
-
-    func test_nonBottomIntersectionDoesNotMoveStatusBar() {
-        let overlap = WindowKeyboardGeometry.bottomOverlap(
-            viewBounds: CGRect(x: 0, y: 0, width: 900, height: 700),
-            keyboardFrame: CGRect(x: 0, y: 300, width: 900, height: 200)
-        )
-
-        XCTAssertEqual(overlap, 0)
     }
 }

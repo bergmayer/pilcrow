@@ -6,6 +6,7 @@ struct SortLinesSheet: View {
 
     let text: String
     let lineEnding: LineEnding
+    var scopeLabel: String = "Whole Document"
     let onApply: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -19,6 +20,7 @@ struct SortLinesSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section { LabeledContent("Scope", value: scopeLabel) }
                 Section("Options") {
                     Toggle("Case-insensitive", isOn: $ignoresCase)
                     Toggle("Numeric sort", isOn: $numeric)

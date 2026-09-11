@@ -97,8 +97,8 @@ extension CommandActions {
     /// — opening a new scene there would silently no-op.
     static func presentMarkdownPreview() {
         if DeviceIdiom.supportsMultipleWindows {
-            Self.context.scenes.requestOpenWindow(.markdownPreview)
-            Self.context.scenes.openWindow?(.markdownPreview)
+            guard let tab = Self.context.scenes.currentSession?.activeTab else { return }
+            Self.context.scenes.openPreviewWindow?(tab.id)
         } else {
             presentSheet(.markdownPreview)
         }
@@ -364,7 +364,7 @@ extension CommandActions {
             let lines = text.components(separatedBy: nl)
             let stripped = lines.map { line -> String in
                 var s = line
-                // BBEdit parity: strip every level, not just one.
+                // Strip every quote level.
                 while s.hasPrefix("> ") { s.removeFirst(2) }
                 while s.hasPrefix(">")  { s.removeFirst() }
                 return s

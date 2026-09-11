@@ -773,7 +773,7 @@ final class AccessoryButton: UIControl {
     var tapAction: (() -> Void)?
 
     var isToggled: Bool = false {
-        didSet { updateBackground() }
+        didSet { updateAppearance() }
     }
 
     init() {
@@ -795,7 +795,7 @@ final class AccessoryButton: UIControl {
             symbolView.centerXAnchor.constraint(equalTo: centerXAnchor),
             symbolView.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
-        updateBackground()
+        updateAppearance()
         addTarget(self, action: #selector(handleTap), for: .touchUpInside)
     }
 
@@ -807,7 +807,8 @@ final class AccessoryButton: UIControl {
         isAccessibilityElement = true
     }
 
-    private func updateBackground() {
+    private func updateAppearance() {
+        accessibilityTraits = isToggled ? [.button, .selected] : .button
         backgroundColor = isToggled
             ? UIColor.tintColor.withAlphaComponent(0.35)
             : UIColor.label.withAlphaComponent(0.06)
@@ -818,7 +819,7 @@ final class AccessoryButton: UIControl {
             if isHighlighted {
                 backgroundColor = UIColor.label.withAlphaComponent(0.18)
             } else {
-                updateBackground()
+                updateAppearance()
             }
         }
     }

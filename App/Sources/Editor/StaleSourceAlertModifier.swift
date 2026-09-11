@@ -45,7 +45,7 @@ struct StaleSourceAlertModifier: ViewModifier {
         case .missing:
             Text("\(check.displayName) is no longer at its original location. Your changes are preserved as an untitled document — use Save As to pick a new location.")
         case .changedOnAdopt:
-            Text("\(check.displayName) has changed on disk since this draft was captured. Continue editing your version, or reload the file from disk and discard the draft.")
+            Text("\(check.displayName) has changed on disk since these unsaved changes were preserved. Continue editing your version, or reload the file from disk and discard the recovered changes.")
         case .changedOnSave:
             Text("\(check.displayName) has been modified on disk since you opened it. Save Anyway overwrites the disk copy; Reload discards your unsaved edits.")
         }

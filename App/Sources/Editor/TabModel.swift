@@ -2,9 +2,8 @@ import Foundation
 
 /// `.fileBrowser` hosts a UIDocumentBrowserViewController inline;
 /// a pick transitions the tab back to `.editor` with the file loaded.
-/// `.launcher` is retained for compatibility with legacy/restored UI
-/// state. Ordinary new windows and tabs now start as blank `.editor`
-/// tabs; templates and recovery have explicit entry points.
+/// `.launcher` is the start page for a new tab or window, or an emptied window. Choosing
+/// a document source replaces it with `.editor` in the same tab.
 enum TabKind {
     case editor
     case fileBrowser
@@ -19,16 +18,44 @@ final class TabModel: Identifiable {
     let document: PlainTextDocument
     let state: EditorState
     /// Pinned tabs sort left, render as compact chips, and survive
-    /// "Close Other Tabs" — mirrors Safari.
+    /// "Close Other Tabs".
     var isPinned: Bool = false
     var kind: TabKind = .editor
     /// Per-tab so split state isn't shared between tabs — each pane
     /// keeps its own cursor / scroll across split toggles.
     var secondaryState: EditorState?
 
-    init() {
+    init(kind: TabKind = .editor) {
         self.document = PlainTextDocument()
         self.state = EditorState()
+        self.kind = kind
+    }
+
+    /// Start an untitled document from a launcher choice or template.
+    /// Seeded text needs recovery even if the user never types a key.
+    func startDocument(with text: String = "") {
+        document.text = text
+        document.fileURL = nil
+        document.isDirty = !text.isEmpty
+        state.text = text
+        state.fileURL = nil
+        state.savedBaselineText = ""
+        kind = .editor
+        state.requestEditorFocus()
+        if document.isDirty { document.autoSave() }
+    }
+
+    func owns(_ editor: EditorState?) -> Bool {
+        guard let editor else { return false }
+        return state === editor || secondaryState === editor
+    }
+
+    /// Read the live buffer for untitled work: its observable text snapshot
+    /// can lag the first keystroke or deletion. `hasText` avoids copying it.
+    var needsCloseConfirmation: Bool {
+        if document.fileURL != nil { return document.isDirty }
+        _ = document.bufferRevision
+        return state.textView?.hasText ?? !document.text.isEmpty
     }
 
     /// Seeds the split pane with the same view settings as the

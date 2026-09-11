@@ -1,11 +1,15 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
+import CryptoKit
+import EditorEngine
 
 /// Searches a folder, the current window, or all open windows.
 struct MultiFileSearchSheet: View {
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
     @Bindable private var bus = AppStateBus.shared
 
     enum Scope: String, CaseIterable, Identifiable {
@@ -17,7 +21,7 @@ struct MultiFileSearchSheet: View {
         var label: String {
             switch self {
             case .folder:  return "Folder…"
-            case .tabs:    return DeviceIdiom.isPhone ? "Open Tabs" : "Tabs in Foreground Window"
+            case .tabs:    return DeviceIdiom.isPhone ? "Open Tabs" : "Tabs in Source Window"
             case .windows: return "All Open Windows"
             }
         }
@@ -38,11 +42,19 @@ struct MultiFileSearchSheet: View {
             case query(Int)
         }
 
+        weak var owner: EditorSession?
+
+        init(owner: EditorSession?) { self.owner = owner }
+
+        var context = AppStateBus.shared.find.context
         var scope: Scope = .folder
         var folder: URL?
         var pickingFolder = false
         var extensionFilter = "swift,m,h,c,cpp,js,ts,tsx,py,rb,go,rs,java,kt,html,css,xml,json,yaml,yml,md,txt"
         var searchTask: Task<Void, Never>?
+        var searchGeneration = UUID()
+        var searchedContext: FindContext?
+        var fingerprints: [ResultGroupKey: Data] = [:]
         var activity: Activity = .idle
         var sourcesScanned = 0
         var results: [SearchResult] = []
@@ -87,7 +99,22 @@ struct MultiFileSearchSheet: View {
         DeviceIdiom.isPhone ? [.folder, .tabs] : Scope.allCases
     }
 
-    @State private var model = Model()
+    @State private var model: Model
+    private let request: UtilityWindowRequest?
+    private let isStandalone: Bool
+
+    init(owner: EditorSession?) {
+        _model = State(initialValue: Model(owner: owner))
+        request = nil
+        isStandalone = false
+    }
+
+    init(request: UtilityWindowRequest?) {
+        self.request = request
+        isStandalone = true
+        let owner = AppStateBus.shared.scenes.allOpenSessions.first { $0.sceneUUID == request?.ownerSessionID }
+        _model = State(initialValue: Model(owner: owner))
+    }
 
     private var scope: Scope { get { model.scope } nonmutating set { model.scope = newValue } }
     private var folder: URL? { get { model.folder } nonmutating set { model.folder = newValue } }
@@ -118,6 +145,7 @@ struct MultiFileSearchSheet: View {
                 controlsSection
                 resultsSection
             }
+            .disabled(model.activity == .replacing)
             .navigationTitle("Multi-File Search")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -135,16 +163,17 @@ struct MultiFileSearchSheet: View {
                 ),
                 allowedContentTypes: [.folder]
             ) { result in
-                if case let .success(url) = result {
-                    folder = url
+                switch result {
+                case .success(let url): folder = url
+                case .failure(let error): errorText = error.localizedDescription
                 }
             }
             .onAppear {
                 if !seenFirstAppear {
                     seenFirstAppear = true
                     // Do not restore this utility window after relaunch.
-                    if !AppStateBus.shared.scenes.consumeOpen(.multiFileSearch) {
-                        AppStateBus.shared.scenes.openWindow?(.editor)
+                    if isStandalone, request?.launchID != SessionsStore.shared.currentLaunchID {
+                        openWindow(id: SceneID.editor.rawValue, value: EditorRoute.newDocument())
                         close()
                         return
                     }
@@ -159,9 +188,9 @@ struct MultiFileSearchSheet: View {
                 )
             ) {
                 Button("Cancel", role: .cancel) { }
-                Button("Replace All", role: .destructive) { performReplaceAll() }
+                Button("Replace All", role: .destructive) { runReplacement { await replaceMatches(results) } }
             } message: {
-                Text("This rewrites \(results.count) match\(results.count == 1 ? "" : "es") and saves every changed file. Cannot be undone from this sheet — use each editor's undo if you need to back out.")
+                Text("Replaces the displayed matches. Folder searches write the source files; open-tab searches edit buffers with undo.")
             }
             .alert(
                 queryAlertTitle,
@@ -169,8 +198,8 @@ struct MultiFileSearchSheet: View {
                 presenting: currentQueryResult
             ) { _ in
                 Button("Skip") { queryAdvance() }
-                Button("Replace") { queryReplaceAndAdvance() }
-                Button("Replace All Remaining", role: .destructive) { queryReplaceAllRemaining() }
+                Button("Replace") { runReplacement { await queryReplaceAndAdvance() } }
+                Button("Replace All Remaining", role: .destructive) { runReplacement { await replaceMatches(Array(results.dropFirst(queryCursor ?? results.count))) } }
                 Button("Cancel", role: .cancel) { queryCursor = nil }
             } message: { match in
                 Text("\(match.groupLabel) line \(match.line):\n\(match.preview)")
@@ -213,14 +242,13 @@ struct MultiFileSearchSheet: View {
                 }
             }
             .pickerStyle(.segmented)
-            .onChange(of: scope) { _, _ in
-                // Clear stale progress so the previous scope's
-                // counts don't leak.
-                results = []
-                groups = []
-                sourcesScanned = 0
-                currentResultIndex = -1
-                errorText = nil
+            .onChange(of: scope) { _, _ in invalidateSearch() }
+            .onChange(of: folder) { _, _ in invalidateSearch() }
+            .onChange(of: extensionFilter) { _, _ in invalidateSearch() }
+            .onChange(of: model.context) { previous, current in
+                var previousPattern = previous
+                previousPattern.replacement = current.replacement
+                if previousPattern != current { invalidateSearch() }
             }
         }
     }
@@ -229,22 +257,22 @@ struct MultiFileSearchSheet: View {
     private var querySection: some View {
         Section("Query") {
             TextField(
-                bus.find.context.useRegex ? "Regular expression" : "Find",
-                text: $bus.find.context.query
+                model.context.useRegex ? "Regular expression" : "Find",
+                text: $model.context.query
             )
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
-            .font(bus.find.context.useRegex ? .body.monospaced() : .body)
+            .font(model.context.useRegex ? .body.monospaced() : .body)
 
-            TextField("Replace with (optional)", text: $bus.find.context.replacement)
+            TextField("Replace with (optional)", text: $model.context.replacement)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
-                .font(bus.find.context.useRegex ? .body.monospaced() : .body)
+                .font(model.context.useRegex ? .body.monospaced() : .body)
 
-            Toggle("Regular Expression", isOn: $bus.find.context.useRegex)
-            Toggle("Case Sensitive",    isOn: $bus.find.context.caseSensitive)
-            Toggle("Whole Word",        isOn: $bus.find.context.wholeWord)
-                .disabled(bus.find.context.useRegex)
+            Toggle("Regular Expression", isOn: $model.context.useRegex)
+            Toggle("Case Sensitive",    isOn: $model.context.caseSensitive)
+            Toggle("Whole Word",        isOn: $model.context.wholeWord)
+                .disabled(model.context.useRegex)
         }
     }
 
@@ -340,7 +368,7 @@ struct MultiFileSearchSheet: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(bus.find.context.query.isEmpty)
+                    .disabled(replacementContext == nil || model.activity != .idle)
                     Button(role: .destructive) {
                         pendingReplaceAllConfirm = true
                     } label: {
@@ -348,7 +376,7 @@ struct MultiFileSearchSheet: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(bus.find.context.query.isEmpty)
+                    .disabled(replacementContext == nil || model.activity != .idle)
                 }
             }
             if let replaceSummary {
@@ -418,14 +446,14 @@ struct MultiFileSearchSheet: View {
     // MARK: - Actions
 
     private func close() {
-        dismiss()
+        if isStandalone { dismissWindow() } else { dismiss() }
     }
 
     private var canStartSearch: Bool {
-        guard !bus.find.context.query.isEmpty else { return false }
+        guard !model.context.query.isEmpty else { return false }
         switch scope {
         case .folder:  return folder != nil
-        case .tabs:    return bus.scenes.currentSession != nil
+        case .tabs:    return model.owner != nil
         case .windows: return !bus.scenes.allOpenSessions.isEmpty
         }
     }
@@ -458,9 +486,7 @@ struct MultiFileSearchSheet: View {
             }
         }
         guard let url = match.url else { return }
-        bus.pending.goToLine = match.line
-        bus.pending.newWindow = url
-        bus.scenes.openWindow?(.editor)
+        CommandActions.routeOpenURL(url, in: model.owner, line: match.line)
     }
 
     private func stepResult(by delta: Int) {
@@ -473,7 +499,29 @@ struct MultiFileSearchSheet: View {
         open(results[currentResultIndex])
     }
 
+    private func invalidateSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        model.searchGeneration = UUID()
+        model.activity = .idle
+        model.searchedContext = nil
+        model.fingerprints = [:]
+        results = []
+        groups = []
+        sourcesScanned = 0
+        currentResultIndex = -1
+        queryCursor = nil
+        queryOffsetDeltas = [:]
+        errorText = nil
+        replaceSummary = nil
+    }
+
     private func startSearch() {
+        searchTask?.cancel()
+        let generation = UUID()
+        model.searchGeneration = generation
+        model.fingerprints = [:]
+        model.searchedContext = nil
         errorText = nil
         results = []
         groups = []
@@ -481,7 +529,8 @@ struct MultiFileSearchSheet: View {
         currentResultIndex = -1
         isSearching = true
 
-        let ctx = bus.find.context
+        let ctx = model.context
+        bus.find.context = ctx
         let exts = Set(
             extensionFilter
                 .split(separator: ",")
@@ -495,18 +544,23 @@ struct MultiFileSearchSheet: View {
         let inMemorySources: [SearchEngine.InMemorySource]
         switch scopeCopy {
         case .folder:  inMemorySources = []
-        case .tabs:    inMemorySources = SearchEngine.tabsSources()
+        case .tabs:    inMemorySources = SearchEngine.tabsSources(in: model.owner)
         case .windows: inMemorySources = SearchEngine.windowsSources()
         }
 
         searchTask = Task { @MainActor in
-            defer { isSearching = false }
+            defer {
+                if model.searchGeneration == generation {
+                    isSearching = false
+                    searchTask = nil
+                }
+            }
             do {
                 let matcher = try SearchEngine.compileMatcher(for: ctx)
                 let worker: Task<SearchEngine.SearchOutput, any Error>
                 if scopeCopy == .folder, let folderCopy {
                     worker = Task.detached(priority: .userInitiated) {
-                        try SearchEngine.runFolderSearch(
+                        try await SearchEngine.runFolderSearch(
                             folder: folderCopy,
                             matcher: matcher,
                             extensions: exts
@@ -526,13 +580,19 @@ struct MultiFileSearchSheet: View {
                     worker.cancel()
                 }
                 try Task.checkCancellation()
+                guard model.searchGeneration == generation else { return }
+                model.searchedContext = ctx
+                model.fingerprints = output.fingerprints
                 results = output.results
                 sourcesScanned = output.sourcesScanned
+                errorText = output.issues.isEmpty ? nil : output.issues.joined(separator: "\n")
             } catch is CancellationError {
                 // Stop button.
             } catch {
+                guard !Task.isCancelled, model.searchGeneration == generation else { return }
                 errorText = error.localizedDescription
             }
+            guard model.searchGeneration == generation else { return }
             groups = Self.group(results)
         }
     }
@@ -540,36 +600,49 @@ struct MultiFileSearchSheet: View {
     /// Pure search/source service. It owns filesystem traversal, source
     /// snapshots, matching, and cancellation; the SwiftUI view only presents
     /// requests and results.
-    fileprivate enum SearchEngine {
+    enum SearchEngine {
 
     /// Past ~10k matches the list becomes unwieldy and previews grow
     /// linearly in memory.
     nonisolated private static let maxResults = 10_000
     /// Above 5 MB almost never holds text the user wants to grep.
-    nonisolated private static let maxFileBytes = 5 * 1024 * 1024
+    nonisolated static let maxFileBytes = 5 * 1024 * 1024
 
-    fileprivate struct SearchOutput: Sendable {
+    struct SearchOutput: Sendable {
         var results: [SearchResult]
         var sourcesScanned: Int
+        var fingerprints: [ResultGroupKey: Data] = [:]
+        var issues: [String] = []
     }
 
-    nonisolated fileprivate static func runFolderSearch(
+    nonisolated static func runFolderSearch(
         folder: URL,
         matcher: Matcher,
         extensions: Set<String>
-    ) throws -> SearchOutput {
+    ) async throws -> SearchOutput {
         let scoped = folder.startAccessingSecurityScopedResource()
         defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
 
-        let urls = Self.collectFiles(in: folder, extensions: extensions)
+        let urls = try Self.collectFiles(in: folder, extensions: extensions)
         try Task.checkCancellation()
 
         var output = SearchOutput(results: [], sourcesScanned: 0)
+        var skipped = 0
         for url in urls {
             try Task.checkCancellation()
-            output.sourcesScanned += 1
             if output.results.count >= Self.maxResults { break }
-            guard let text = Self.readText(at: url) else { continue }
+            output.sourcesScanned += 1
+            let source: (text: String, fingerprint: Data)
+            do {
+                source = try await Self.readText(at: url)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                skipped += 1
+                if output.issues.count < 20 { output.issues.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+                continue
+            }
+            let text = source.text
             let groupKey = ResultGroupKey.url(url)
             let groupLabel = url.lastPathComponent
             let hits = matcher.matches(
@@ -580,11 +653,14 @@ struct MultiFileSearchSheet: View {
                 limit: Self.maxResults - output.results.count
             )
             output.results.append(contentsOf: hits)
+            if !hits.isEmpty { output.fingerprints[groupKey] = source.fingerprint }
         }
+        if skipped > 0 { output.issues.insert("Skipped \(skipped) files. Details for up to 20 files follow.", at: 0) }
+        if output.results.count == maxResults { output.issues.append("Results limited to 10,000 matches. Narrow the search to see more.") }
         return output
     }
 
-    nonisolated fileprivate static func runInMemorySearch(
+    nonisolated static func runInMemorySearch(
         sources: [InMemorySource],
         matcher: Matcher
     ) throws -> SearchOutput {
@@ -601,13 +677,15 @@ struct MultiFileSearchSheet: View {
                 limit: Self.maxResults - output.results.count
             )
             output.results.append(contentsOf: hits)
+            if !hits.isEmpty { output.fingerprints[source.groupKey] = fingerprint(Data(source.text.utf8)) }
         }
+        if output.results.count == maxResults { output.issues.append("Results limited to 10,000 matches. Narrow the search to see more.") }
         return output
     }
 
     // MARK: - In-memory source collection
 
-    fileprivate struct InMemorySource: Sendable {
+    struct InMemorySource: Sendable {
         let groupKey: ResultGroupKey
         let groupLabel: String
         let url: URL?
@@ -615,8 +693,8 @@ struct MultiFileSearchSheet: View {
     }
 
     @MainActor
-    fileprivate static func tabsSources() -> [InMemorySource] {
-        guard let session = AppStateBus.shared.scenes.currentSession else { return [] }
+    static func tabsSources(in session: EditorSession?) -> [InMemorySource] {
+        guard let session else { return [] }
         return session.tabs.enumerated().map { idx, tab in
             sourceFor(tab: tab, windowIndex: nil, tabIndex: idx)
         }
@@ -651,39 +729,51 @@ struct MultiFileSearchSheet: View {
 
     // MARK: - File walking + reading
 
-    nonisolated private static func collectFiles(in root: URL, extensions: Set<String>) -> [URL] {
+    nonisolated private static func collectFiles(in root: URL, extensions: Set<String>) throws -> [URL] {
         var collected: [URL] = []
         let manager = FileManager.default
+        var enumerationError: (any Error)?
         guard let enumerator = manager.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
+            options: [.skipsHiddenFiles],
+            errorHandler: { _, error in enumerationError = error; return false }
+        ) else { throw CocoaError(.fileReadUnknown, userInfo: [NSURLErrorKey: root]) }
         for case let url as URL in enumerator {
-            if Task.isCancelled { break }
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
-            guard values?.isRegularFile == true else { continue }
+            try Task.checkCancellation()
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
             if !extensions.isEmpty {
                 let ext = url.pathExtension.lowercased()
                 guard extensions.contains(ext) else { continue }
             }
             collected.append(url)
-            if collected.count >= 200_000 { break }
+            if collected.count > 200_000 { throw SearchFailure.tooManyFiles }
         }
-        return collected
+        if let enumerationError { throw enumerationError }
+        return collected.sorted { $0.path < $1.path }
     }
 
-    nonisolated private static func readText(at url: URL) -> String? {
-        guard let attrs = try? url.resourceValues(forKeys: [.fileSizeKey]),
-              let size = attrs.fileSize, size <= maxFileBytes
-        else { return nil }
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? PlainTextDocument.decodePayload(from: data).text
+    enum SearchFailure: LocalizedError {
+        case tooManyFiles
+        var errorDescription: String? { "This folder contains more than 200,000 matching files. Choose a smaller folder or narrow the extension filter." }
+    }
+
+    nonisolated private static func readText(at url: URL) async throws -> (text: String, fingerprint: Data) {
+        try await CoordinatedFileAccess.perform(at: url) { sourceURL in
+            let attributes = try sourceURL.resourceValues(forKeys: [.fileSizeKey])
+            guard let size = attributes.fileSize, size <= maxFileBytes else {
+                throw PlainTextDocument.DocumentError.fileTooLarge(bytes: attributes.fileSize ?? 0)
+            }
+            let data = try Data(contentsOf: sourceURL)
+            guard data.count <= maxFileBytes else { throw PlainTextDocument.DocumentError.fileTooLarge(bytes: data.count) }
+            return (try PlainTextDocument.decodePayload(from: data).text, fingerprint(data))
+        }
     }
 
     // MARK: - Matching
 
-    fileprivate struct Matcher: @unchecked Sendable {
+    struct Matcher: Sendable {
         let regex: NSRegularExpression?
         let literal: String?
         let caseSensitive: Bool
@@ -702,7 +792,8 @@ struct MultiFileSearchSheet: View {
             var cursor = LineCursor()
             if let regex {
                 let range = NSRange(location: 0, length: ns.length)
-                regex.enumerateMatches(in: text, options: [], range: range) { match, _, stop in
+                regex.enumerateMatches(in: text, options: [.reportProgress], range: range) { match, _, stop in
+                    if Task.isCancelled { stop.pointee = true; return }
                     guard let match else { return }
                     out.append(makeResult(at: match.range, ns: ns, cursor: &cursor,
                                           groupKey: groupKey, groupLabel: groupLabel,
@@ -711,7 +802,7 @@ struct MultiFileSearchSheet: View {
                 }
             } else if let literal {
                 var searchStart = 0
-                while searchStart < ns.length {
+                while searchStart < ns.length, !Task.isCancelled {
                     let searchRange = NSRange(location: searchStart, length: ns.length - searchStart)
                     let opts: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
                     let found = ns.range(of: literal, options: opts, range: searchRange)
@@ -771,7 +862,7 @@ struct MultiFileSearchSheet: View {
         }
     }
 
-    fileprivate static func compileMatcher(for ctx: FindContext) throws -> Matcher {
+    static func compileMatcher(for ctx: FindContext) throws -> Matcher {
         if FindCompile.useRegex(for: ctx) {
             return Matcher(
                 regex: try FindCompile.regex(for: ctx),
@@ -839,6 +930,16 @@ struct MultiFileSearchSheet: View {
         }
     }
 
+    private var replacementContext: FindContext? {
+        guard var context = model.searchedContext else { return nil }
+        context.replacement = model.context.replacement
+        return context == model.context ? context : nil
+    }
+
+    nonisolated static func fingerprint(_ data: Data) -> Data {
+        Data(SHA256.hash(data: data))
+    }
+
     // MARK: - Replace
 
     private enum ReplacementFailure: LocalizedError {
@@ -861,51 +962,63 @@ struct MultiFileSearchSheet: View {
         }
     }
 
-    fileprivate struct ReplacementOutcome {
+    struct ReplacementOutcome: Sendable {
         let count: Int
         let utf16Delta: Int
+        var fingerprint: Data?
 
         static let unchanged = ReplacementOutcome(count: 0, utf16Delta: 0)
     }
 
-    /// File-backed sources rewrite via atomic Data.write; open tabs flow
-    /// the new text through the live engine buffer then sync the document.
-    private func performReplaceAll() {
-        let ctx = bus.find.context
-        guard !ctx.query.isEmpty else { return }
+    private func runReplacement(_ operation: @escaping @MainActor () async -> Void) {
+        guard model.activity == .idle else { return }
+        let generation = model.searchGeneration
         model.activity = .replacing
-        defer { model.activity = .idle }
-        var filesChanged = 0
-        var totalReplacements = 0
-        var errors: [String] = []
-        for key in Set(results.map { $0.groupKey }) {
+        searchTask = Task { @MainActor in
+            await operation()
+            guard model.searchGeneration == generation else { return }
+            model.activity = .idle
+            searchTask = nil
+        }
+    }
+
+    /// All bulk modes consume the same displayed ranges and source versions.
+    private func replaceMatches(_ matches: [SearchResult]) async {
+        guard let ctx = replacementContext else { return }
+        let generation = model.searchGeneration
+        let targets = Self.group(matches)
+        var sourcesChanged = 0
+        var replaced = 0
+        var failures: [String] = []
+        for group in targets {
+            if Task.isCancelled { break }
+            let delta = queryOffsetDeltas[group.key, default: 0]
+            let ranges = group.matches.map { NSRange(location: $0.range.location + delta, length: $0.range.length) }
             do {
-                let outcome = try replacementEngine.applyReplacement(
-                    in: key,
-                    query: ctx.query,
-                    replacement: ctx.replacement,
-                    context: ctx
-                )
-                if outcome.count > 0 {
-                    filesChanged += 1
-                    totalReplacements += outcome.count
-                }
+                let outcome = try await replacementEngine.applyReplacement(in: group.key,
+                    query: ctx.query, replacement: ctx.replacement, context: ctx,
+                    expectedFingerprint: model.fingerprints[group.key], targetRanges: ranges)
+                sourcesChanged += outcome.count > 0 ? 1 : 0
+                replaced += outcome.count
+            } catch is CancellationError {
+                break
             } catch {
-                errors.append(error.localizedDescription)
+                failures.append("\(group.label): \(error.localizedDescription)")
             }
         }
-        replaceSummary = "Replaced \(totalReplacements) match\(totalReplacements == 1 ? "" : "es") in \(filesChanged) file\(filesChanged == 1 ? "" : "s")."
-        if !errors.isEmpty {
-            errorText = errors.prefix(3).joined(separator: " — ")
+        guard model.searchGeneration == generation else { return }
+        replaceSummary = "Replaced \(replaced) matches in \(sourcesChanged) sources."
+        if !failures.isEmpty {
+            errorText = failures.joined(separator: "\n")
         }
-        // Replacements invalidate the current result offsets.
-        results.removeAll()
-        groups.removeAll()
+        queryCursor = nil
+        results = []
+        groups = []
         currentResultIndex = -1
     }
 
     private func beginQueryReplace() {
-        guard !results.isEmpty else { return }
+        guard !results.isEmpty, replacementContext != nil else { return }
         replaceSummary = nil
         queryOffsetDeltas = [:]
         queryCursor = 0
@@ -914,86 +1027,46 @@ struct MultiFileSearchSheet: View {
     private func queryAdvance() {
         guard let cursor = queryCursor else { return }
         let next = cursor + 1
-        if next >= results.count {
-            queryCursor = nil
-            replaceSummary = "Query mode finished."
-        } else {
+        if next < results.count {
             queryCursor = next
+        } else {
+            queryCursor = nil
+            results = []
+            groups = []
+            currentResultIndex = -1
+            replaceSummary = "Query mode finished."
         }
     }
 
-    private func queryReplaceAndAdvance() {
-        guard let cursor = queryCursor, results.indices.contains(cursor) else { return }
+    private func queryReplaceAndAdvance() async {
+        guard let cursor = queryCursor, results.indices.contains(cursor), let ctx = replacementContext else { return }
+        let generation = model.searchGeneration
         let target = results[cursor]
-        let ctx = bus.find.context
         do {
-            let delta = queryOffsetDeltas[target.groupKey, default: 0]
-            let adjustedRange = NSRange(
-                location: target.range.location + delta,
-                length: target.range.length
-            )
-            let outcome = try replacementEngine.applyReplacement(
-                in: target.groupKey,
-                query: ctx.query,
-                replacement: ctx.replacement,
-                context: ctx,
-                targetRanges: [adjustedRange]
-            )
+            let range = NSRange(location: target.range.location + queryOffsetDeltas[target.groupKey, default: 0], length: target.range.length)
+            let outcome = try await replacementEngine.applyReplacement(in: target.groupKey,
+                query: ctx.query, replacement: ctx.replacement, context: ctx,
+                expectedFingerprint: model.fingerprints[target.groupKey], targetRanges: [range])
+            guard model.searchGeneration == generation else { return }
             queryOffsetDeltas[target.groupKey, default: 0] += outcome.utf16Delta
+            model.fingerprints[target.groupKey] = outcome.fingerprint
+            queryAdvance()
         } catch {
+            guard model.searchGeneration == generation else { return }
             errorText = error.localizedDescription
+            queryCursor = nil
         }
-        queryAdvance()
-    }
-
-    private func queryReplaceAllRemaining() {
-        guard let cursor = queryCursor else { return }
-        model.activity = .replacing
-        defer { model.activity = .idle }
-        let ctx = bus.find.context
-        var changedSources = 0
-        var replaceCount = 0
-        var targetsByKey: [ResultGroupKey: [NSRange]] = [:]
-        for result in results.dropFirst(cursor) {
-            let delta = queryOffsetDeltas[result.groupKey, default: 0]
-            targetsByKey[result.groupKey, default: []].append(
-                NSRange(location: result.range.location + delta, length: result.range.length)
-            )
-        }
-        for (key, ranges) in targetsByKey {
-            do {
-                let outcome = try replacementEngine.applyReplacement(
-                    in: key,
-                    query: ctx.query,
-                    replacement: ctx.replacement,
-                    context: ctx,
-                    targetRanges: ranges
-                )
-                if outcome.count > 0 {
-                    changedSources += 1
-                    replaceCount += outcome.count
-                }
-            } catch {
-                errorText = error.localizedDescription
-            }
-        }
-        replaceSummary = "Replaced \(replaceCount) remaining match\(replaceCount == 1 ? "" : "es") in \(changedSources) source\(changedSources == 1 ? "" : "s")."
-        queryCursor = nil
-        results.removeAll()
-        groups.removeAll()
-        currentResultIndex = -1
     }
 
     private var replacementEngine: ReplacementEngine {
-        ReplacementEngine(scope: scope, folder: folder)
+        ReplacementEngine(folder: folder)
     }
 
     @MainActor
-    fileprivate struct ReplacementEngine {
-        let scope: Scope
+    struct ReplacementEngine {
         let folder: URL?
 
-        private struct TextReplacement {
+        private struct TextReplacement: Sendable {
             let text: String
             let count: Int
             let utf16Delta: Int
@@ -1003,182 +1076,117 @@ struct MultiFileSearchSheet: View {
             }
         }
 
-        fileprivate func applyReplacement(
+        private struct FileEdit: Sendable {
+            let originalText: String
+            let saved: PlainTextDocument.SavedSnapshot
+            let outcome: ReplacementOutcome
+        }
+
+        func applyReplacement(
             in key: ResultGroupKey,
             query: String,
             replacement: String,
             context ctx: FindContext,
-            limitToFirst: Bool = false,
-            targetRanges: [NSRange]? = nil
-        ) throws -> ReplacementOutcome {
+            expectedFingerprint: Data?,
+            targetRanges: [NSRange]
+        ) async throws -> ReplacementOutcome {
+            guard let expectedFingerprint else { throw ReplacementFailure.matchNoLongerExists }
+            try Task.checkCancellation()
             switch key {
             case .url(let url):
-                return try applyReplacementToFile(
-                    url: url,
-                    query: query,
-                    replacement: replacement,
-                    context: ctx,
-                    limitToFirst: limitToFirst,
-                    targetRanges: targetRanges
-                )
+                return try await replaceFile(url, query: query, replacement: replacement,
+                    context: ctx, expected: expectedFingerprint, ranges: targetRanges)
             case .tab(let id):
-                return try applyReplacementToTab(
-                    tabID: id,
-                    query: query,
-                    replacement: replacement,
-                    context: ctx,
-                    limitToFirst: limitToFirst,
-                    targetRanges: targetRanges
-                )
+                guard let tab = Self.openTab(id: id) else { throw ReplacementFailure.matchNoLongerExists }
+                let before = tab.state.textView?.text ?? tab.document.text
+                guard fingerprint(Data(before.utf8)) == expectedFingerprint else {
+                    throw ReplacementFailure.matchNoLongerExists
+                }
+                let worker = Task.detached(priority: .userInitiated) {
+                    try Self.makeReplacement(in: before, query: query, replacement: replacement,
+                        context: ctx, limitToFirst: false, targetRanges: targetRanges)
+                }
+                let update = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                try Task.checkCancellation()
+                guard let update else { return .unchanged }
+                guard (tab.state.textView?.text ?? tab.document.text) == before,
+                      Self.openTab(id: id) === tab else { throw ReplacementFailure.matchNoLongerExists }
+                Self.apply(update.text, to: tab, replacing: before)
+                tab.document.autoSave()
+                return ReplacementOutcome(count: update.count, utf16Delta: update.utf16Delta,
+                    fingerprint: fingerprint(Data(update.text.utf8)))
             }
         }
 
-        private func applyReplacementToFile(
-            url: URL,
-            query: String,
-            replacement: String,
-            context ctx: FindContext,
-            limitToFirst: Bool,
-            targetRanges: [NSRange]?
-        ) throws -> ReplacementOutcome {
-            if let openTab = Self.openTab(for: url) {
-                let liveText = openTab.state.textView?.text ?? openTab.document.text
-                let hasUnsavedChanges = openTab.document.isDirty
-                    || liveText != openTab.state.savedBaselineText
-                guard !hasUnsavedChanges else {
+        private func replaceFile(
+            _ url: URL, query: String, replacement: String, context: FindContext,
+            expected: Data, ranges: [NSRange]
+        ) async throws -> ReplacementOutcome {
+            for tab in Self.openTabs(for: url) {
+                let live = tab.state.textView?.text ?? tab.document.text
+                guard !tab.document.isDirty, live == tab.state.savedBaselineText else {
                     throw ReplacementFailure.openFileHasUnsavedChanges(url.lastPathComponent)
                 }
-                return try applyReplacementToTab(
-                    tabID: openTab.id,
-                    query: query,
-                    replacement: replacement,
-                    context: ctx,
-                    limitToFirst: limitToFirst,
-                    targetRanges: targetRanges,
-                    saveAfterReplacing: true
-                )
             }
-            return try applyReplacementToClosedFile(
-                url: url,
-                query: query,
-                replacement: replacement,
-                context: ctx,
-                limitToFirst: limitToFirst,
-                targetRanges: targetRanges
-            )
-        }
-
-        private func applyReplacementToClosedFile(
-            url: URL,
-            query: String,
-            replacement: String,
-            context ctx: FindContext,
-            limitToFirst: Bool,
-            targetRanges: [NSRange]?
-        ) throws -> ReplacementOutcome {
-            let folderScoped = scope == .folder
-                && folder?.startAccessingSecurityScopedResource() == true
+            let folderScoped = folder?.startAccessingSecurityScopedResource() == true
             defer { if folderScoped, let folder { folder.stopAccessingSecurityScopedResource() } }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
-            let data = try Data(contentsOf: url)
-            let payload = try PlainTextDocument.decodePayload(from: data)
-            guard let update = try Self.makeReplacement(
-                in: payload.text,
-                query: query,
-                replacement: replacement,
-                context: ctx,
-                limitToFirst: limitToFirst,
-                targetRanges: targetRanges
-            ) else { return .unchanged }
-            guard let outData = Self.encodeReplacement(
-                update.text,
-                encoding: payload.encoding.encoding,
-                originalData: data
-            ) else {
-                throw ReplacementFailure.cannotEncode(
-                    url.lastPathComponent,
-                    payload.encoding.localizedName
-                )
+            let edit: FileEdit? = try await CoordinatedFileAccess.perform(at: url, writing: true) { destination in
+                let size = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard size <= SearchEngine.maxFileBytes else { throw PlainTextDocument.DocumentError.fileTooLarge(bytes: size) }
+                let data = try Data(contentsOf: destination)
+                guard data.count <= SearchEngine.maxFileBytes else { throw PlainTextDocument.DocumentError.fileTooLarge(bytes: data.count) }
+                guard fingerprint(data) == expected else {
+                    throw ReplacementFailure.sourceChanged(url.lastPathComponent)
+                }
+                let payload = try PlainTextDocument.decodePayload(from: data)
+                guard let update = try Self.makeReplacement(in: payload.text, query: query,
+                    replacement: replacement, context: context, limitToFirst: false, targetRanges: ranges)
+                else { return nil }
+                guard let encoded = Self.encodeReplacement(update.text,
+                    encoding: payload.encoding.encoding, originalData: data) else {
+                    throw ReplacementFailure.cannotEncode(url.lastPathComponent, payload.encoding.localizedName)
+                }
+                try encoded.write(to: destination, options: .atomic)
+                let date = try? destination.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+                let saved = PlainTextDocument.SavedSnapshot(url: destination, inputText: payload.text,
+                    text: update.text, data: encoded, encoding: payload.encoding,
+                    lineEnding: PlainTextDocument.detectLineEnding(in: update.text) ?? .lf,
+                    modificationDate: date)
+                return FileEdit(originalText: payload.text, saved: saved,
+                    outcome: ReplacementOutcome(count: update.count, utf16Delta: update.utf16Delta,
+                        fingerprint: fingerprint(encoded)))
             }
-            try outData.write(to: url, options: .atomic)
-            return update.outcome
-        }
-
-        private func applyReplacementToTab(
-            tabID: UUID,
-            query: String,
-            replacement: String,
-            context ctx: FindContext,
-            limitToFirst: Bool,
-            targetRanges: [NSRange]?,
-            saveAfterReplacing: Bool = false
-        ) throws -> ReplacementOutcome {
-            guard let tab = Self.openTab(id: tabID) else { return .unchanged }
-            try Self.validateSource(of: tab, beforeSaving: saveAfterReplacing)
-
-            let liveText = tab.state.textView?.text ?? tab.document.text
-            guard let update = try Self.makeReplacement(
-                in: liveText,
-                query: query,
-                replacement: replacement,
-                context: ctx,
-                limitToFirst: limitToFirst,
-                targetRanges: targetRanges
-            ) else { return .unchanged }
-
-            Self.apply(update.text, to: tab, replacing: liveText)
-            if saveAfterReplacing, tab.document.fileURL != nil {
-                try Self.save(tab, text: update.text)
-            } else {
-                tab.document.autoSave()
+            guard let edit else { return .unchanged }
+            for tab in Self.openTabs(for: url) {
+                let live = tab.state.textView?.text ?? tab.document.text
+                // An edit made while the write waited belongs to that tab.
+                // Its old disk baseline will require conflict resolution on Save.
+                guard !tab.document.isDirty, live == edit.originalText else { continue }
+                Self.apply(edit.saved.text, to: tab, replacing: live)
+                tab.document.finishExternalSave(to: edit.saved.url, savedText: edit.saved.text,
+                    savedData: edit.saved.data, currentText: edit.saved.text,
+                    modificationDate: edit.saved.modificationDate)
+                tab.state.savedBaselineText = edit.saved.text
             }
-            return update.outcome
-        }
-
-        private static func validateSource(of tab: TabModel, beforeSaving: Bool) throws {
-            guard beforeSaving, let url = tab.document.fileURL else { return }
-            guard let loadedMtime = tab.document.sourceMtimeAtLoad,
-                  let loadedSize = tab.document.sourceSizeAtLoad,
-                  let current = PlainTextDocument.diskAttrs(of: url),
-                  current.mtime == loadedMtime,
-                  current.size == loadedSize
-            else {
-                throw ReplacementFailure.sourceChanged(url.lastPathComponent)
-            }
+            return edit.outcome
         }
 
         private static func apply(_ text: String, to tab: TabModel, replacing oldText: String) {
             if let textView = tab.state.textView {
-                textView.replace(
-                    NSRange(location: 0, length: (oldText as NSString).length),
-                    withText: text
-                )
+                textView.replaceText(in: BatchReplaceSet(replacements: [
+                    .init(range: NSRange(location: 0, length: oldText.utf16.count), text: text)
+                ]))
+            } else {
+                tab.document.isDirty = true
+                tab.document.bufferRevision &+= 1
             }
             tab.document.text = text
-            tab.document.isDirty = true
-            tab.document.bufferRevision &+= 1
             tab.state.text = text
         }
 
-        private static func save(_ tab: TabModel, text: String) throws {
-            let prepared = tab.document.preparedTextForSaving(text)
-            if prepared != text, let textView = tab.state.textView {
-                textView.replace(
-                    NSRange(location: 0, length: (text as NSString).length),
-                    withText: prepared
-                )
-            }
-            tab.document.text = prepared
-            tab.state.text = prepared
-            try tab.document.save()
-            tab.state.savedBaselineText = prepared
-            tab.state.fileEncoding = tab.document.fileEncoding
-            tab.state.lineEnding = tab.document.lineEnding
-        }
-
-        private static func makeReplacement(
+        nonisolated private static func makeReplacement(
             in text: String,
             query: String,
             replacement: String,
@@ -1217,16 +1225,11 @@ struct MultiFileSearchSheet: View {
             return nil
         }
 
-        private static func openTab(for url: URL) -> TabModel? {
+        private static func openTabs(for url: URL) -> [TabModel] {
             let target = url.standardizedFileURL
-            for session in AppStateBus.shared.scenes.allOpenSessions {
-                if let tab = session.tabs.first(where: {
-                    $0.document.fileURL?.standardizedFileURL == target
-                }) {
-                    return tab
-                }
+            return AppStateBus.shared.scenes.allOpenSessions.flatMap(\.tabs).filter {
+                $0.document.fileURL?.standardizedFileURL == target
             }
-            return nil
         }
 
         nonisolated static func encodeReplacement(
@@ -1295,21 +1298,34 @@ struct MultiFileSearchSheet: View {
             replacement: String,
             context: FindContext
         ) throws -> (String, Int) {
-            var current = text
-            var count = 0
-            for range in ranges.sorted(by: { $0.location > $1.location }) {
-                let result = try replaceExactMatch(
-                    in: current,
-                    range: range,
-                    query: query,
-                    replacement: replacement,
-                    context: context
-                )
-                guard result.didReplace else { continue }
-                current = result.text
-                count += 1
+            let source = text as NSString
+            let requested = Set(ranges)
+            var edits: [(NSRange, String)] = []
+            if FindCompile.useRegex(for: context) {
+                let regex = try FindCompile.regex(for: context)
+                regex.enumerateMatches(in: text, options: [.reportProgress],
+                    range: NSRange(location: 0, length: source.length)) { match, _, stop in
+                    if Task.isCancelled { stop.pointee = true; return }
+                    guard let match, requested.contains(match.range) else { return }
+                    edits.append((match.range, regex.replacementString(for: match, in: text,
+                        offset: 0, template: replacement)))
+                }
+            } else {
+                let options: NSString.CompareOptions = context.caseSensitive ? [] : [.caseInsensitive]
+                for range in requested {
+                    try Task.checkCancellation()
+                    guard range.location >= 0, range.length >= 0,
+                          range.location <= source.length, range.length <= source.length - range.location,
+                          source.range(of: query, options: options, range: range) == range else { continue }
+                    edits.append((range, replacement))
+                }
             }
-            return (current, count)
+            try Task.checkCancellation()
+            let output = NSMutableString(string: text)
+            for (range, replacement) in edits.sorted(by: { $0.0.location > $1.0.location }) {
+                output.replaceCharacters(in: range, with: replacement)
+            }
+            return (output as String, edits.count)
         }
 
         nonisolated private static func replaceRegex(
@@ -1372,64 +1388,7 @@ struct MultiFileSearchSheet: View {
             return (mutable as String, 1)
         }
 
-        nonisolated private static func replaceExactMatch(
-            in text: String,
-            range target: NSRange,
-            query: String,
-            replacement: String,
-            context ctx: FindContext
-        ) throws -> (text: String, didReplace: Bool) {
-            let nsText = text as NSString
-            guard target.location >= 0,
-                  target.length >= 0,
-                  NSMaxRange(target) <= nsText.length
-            else { return (text, false) }
 
-            if FindCompile.useRegex(for: ctx) {
-                return try replaceExactRegexMatch(
-                    in: text,
-                    target: target,
-                    replacement: replacement,
-                    context: ctx
-                )
-            }
-            let options: NSString.CompareOptions = ctx.caseSensitive ? [] : [.caseInsensitive]
-            let found = nsText.range(of: query, options: options, range: target)
-            guard found == target else { return (text, false) }
-            let mutable = NSMutableString(string: text)
-            mutable.replaceCharacters(in: target, with: replacement)
-            return (mutable as String, true)
-        }
-
-        nonisolated private static func replaceExactRegexMatch(
-            in text: String,
-            target: NSRange,
-            replacement: String,
-            context: FindContext
-        ) throws -> (text: String, didReplace: Bool) {
-            let regex = try FindCompile.regex(for: context)
-            let fullRange = NSRange(location: 0, length: (text as NSString).length)
-            var exact: NSTextCheckingResult?
-            regex.enumerateMatches(in: text, options: [], range: fullRange) { match, _, stop in
-                guard let match else { return }
-                if match.range == target {
-                    exact = match
-                    stop.pointee = true
-                } else if match.range.location > target.location {
-                    stop.pointee = true
-                }
-            }
-            guard let exact else { return (text, false) }
-            let substituted = regex.replacementString(
-                for: exact,
-                in: text,
-                offset: 0,
-                template: replacement
-            )
-            let mutable = NSMutableString(string: text)
-            mutable.replaceCharacters(in: exact.range, with: substituted)
-            return (mutable as String, true)
-        }
     }
 
     nonisolated static func encodeReplacement(

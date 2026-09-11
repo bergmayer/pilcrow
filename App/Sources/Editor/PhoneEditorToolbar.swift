@@ -1,13 +1,7 @@
 import SwiftUI
 
-/// iPhone-only navigation-bar toolbar: gear + file (leading), edit
-/// title (principal), undo + palette/overflow (trailing). Extracted as
-/// a `ToolbarContent` value so the five inline `ToolbarItem`s don't
-/// inflate `EditorView.body` past the Swift type-checker's expression
-/// budget. The palette-entry branch depends on whether the in-app
-/// WindowToolbar is enabled — when the user has hidden the WindowToolbar
-/// the trailing slot becomes a single palette button; otherwise it's
-/// the combined Toolbar Actions menu.
+/// Compact iPhone chrome preserves room for the document's name. File and
+/// settings actions share the existing menu; undo and redo stay one tap away.
 struct PhoneEditorToolbar: ToolbarContent {
 
     let documentTitle: String
@@ -15,27 +9,9 @@ struct PhoneEditorToolbar: ToolbarContent {
     let claimFocus: () -> Void
 
     var body: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            Button {
-                claimFocus()
-                CommandActions.presentPreferences()
-            } label: {
-                Image(systemName: "gear")
-            }
-            .accessibilityLabel("Settings")
-        }
-        ToolbarItem(placement: .topBarLeading) {
-            Button {
-                claimFocus()
-                CommandActions.presentFileBrowser()
-            } label: {
-                Image(systemName: "folder")
-            }
-            .accessibilityLabel("Open File")
-        }
         ToolbarItem(placement: .principal) {
             // Tappable / renameable title replaces the system
-            // navigationTitle so the iPhone gets BBEdit-style inline
+            // navigationTitle so the iPhone gets inline
             // rename without a separate sheet.
             EditableTitleView(
                 title: documentTitle,
@@ -53,22 +29,16 @@ struct PhoneEditorToolbar: ToolbarContent {
             .accessibilityLabel("Undo")
         }
         ToolbarItem(placement: .topBarTrailing) {
-            paletteEntry
-        }
-    }
-
-    @ViewBuilder
-    private var paletteEntry: some View {
-        if showToolbarPref {
-            combinedMenu
-        } else {
             Button {
                 claimFocus()
-                CommandActions.presentCommandPalette()
+                CommandActions.redo()
             } label: {
-                Image(systemName: "command.square")
+                Image(systemName: "arrow.uturn.forward")
             }
-            .accessibilityLabel("Command Palette")
+            .accessibilityLabel("Redo")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            combinedMenu
         }
     }
 
@@ -76,14 +46,26 @@ struct PhoneEditorToolbar: ToolbarContent {
     private var combinedMenu: some View {
         let slots = ToolbarConfig.shared.slots
         Menu {
-            // Palette pinned at top — same affordance with toolbar off.
+            // Core actions stay available with customized toolbar actions hidden.
             Button {
                 claimFocus()
                 CommandActions.presentCommandPalette()
             } label: {
                 Label("Command Palette…", systemImage: "command.square")
             }
-            if !slots.isEmpty {
+            Button {
+                claimFocus()
+                CommandActions.presentFileBrowser()
+            } label: {
+                Label("Open File…", systemImage: "folder")
+            }
+            Button {
+                claimFocus()
+                CommandActions.presentPreferences()
+            } label: {
+                Label("Settings…", systemImage: "gear")
+            }
+            if showToolbarPref, !slots.isEmpty {
                 Divider()
                 ForEach(slots) { slot in
                     if let cmd = CommandRegistry.lookup(id: slot.commandId) {

@@ -380,42 +380,37 @@ enum Transformations {
     /// Decode `\n` `\t` `\r` `\\` `\"` `\'` `\xHH` `\uHHHH`. Unknown escapes
     /// pass through.
     static func interpretEscapeSequences(_ text: String) -> String {
+        let simple: [Character: Character] = [
+            "n": "\n", "t": "\t", "r": "\r", "\\": "\\",
+            "\"": "\"", "'": "'", "0": "\0"
+        ]
+        let hexWidths: [Character: Int] = ["x": 2, "u": 4]
         var out = String()
         out.reserveCapacity(text.count)
         var i = text.startIndex
         while i < text.endIndex {
             let ch = text[i]
-            if ch == "\\", let next = text.index(i, offsetBy: 1, limitedBy: text.endIndex), next < text.endIndex {
-                let esc = text[next]
-                switch esc {
-                case "n": out.append("\n"); i = text.index(after: next)
-                case "t": out.append("\t"); i = text.index(after: next)
-                case "r": out.append("\r"); i = text.index(after: next)
-                case "\\": out.append("\\"); i = text.index(after: next)
-                case "\"": out.append("\""); i = text.index(after: next)
-                case "'": out.append("'"); i = text.index(after: next)
-                case "0": out.append("\0"); i = text.index(after: next)
-                case "x":
-                    if let hex = takeHex(in: text, from: text.index(after: next), count: 2),
-                       let val = UInt32(hex.0, radix: 16),
-                       let scalar = Unicode.Scalar(val) {
-                        out.unicodeScalars.append(scalar)
-                        i = hex.1
-                    } else { out.append(ch); i = text.index(after: i) }
-                case "u":
-                    // Exactly 4 digits — \u is fixed-width, unlike C-style \x.
-                    if let hex = takeHex(in: text, from: text.index(after: next), count: 4),
-                       hex.0.count == 4,
-                       let val = UInt32(hex.0, radix: 16),
-                       let scalar = Unicode.Scalar(val) {
-                        out.unicodeScalars.append(scalar)
-                        i = hex.1
-                    } else { out.append(ch); i = text.index(after: i) }
-                default: out.append(ch); i = text.index(after: i)
+            let next = text.index(after: i)
+            if ch == "\\", next < text.endIndex {
+                let escape = text[next]
+                if let replacement = simple[escape] {
+                    out.append(replacement)
+                    i = text.index(after: next)
+                    continue
                 }
-            } else {
-                out.append(ch); i = text.index(after: i)
+                if let width = hexWidths[escape],
+                   let hex = takeHex(in: text, from: text.index(after: next), count: width),
+                   escape != "u" || hex.0.count == width,
+                   let value = UInt32(hex.0, radix: 16),
+                   let scalar = Unicode.Scalar(value) {
+                    out.unicodeScalars.append(scalar)
+                    i = hex.1
+                    continue
+                }
             }
+            // Unknown, incomplete, and invalid scalar escapes stay literal.
+            out.append(ch)
+            i = next
         }
         return out
     }
@@ -568,7 +563,7 @@ enum Transformations {
     }
 }
 
-/// Categories mirror BBEdit's Zap Gremlins dialog.
+/// Character categories and replacement text for Zap Gremlins.
 struct ZapGremlinsOptions: Equatable {
     /// C0 (0x00–0x1F except TAB/LF/CR), DEL (0x7F), and C1 (0x80–0x9F).
     var asciiControl: Bool = true

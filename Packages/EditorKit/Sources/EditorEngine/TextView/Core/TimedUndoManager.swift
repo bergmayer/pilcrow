@@ -27,6 +27,9 @@ final class TimedUndoManager: UndoManager {
     }
 
     override func endUndoGrouping() {
+        // UndoManager owns the inverse group while replaying an action.
+        // A batch edit must not close it while registering redo/undo.
+        guard !isUndoing, !isRedoing else { return }
         cancelTimer()
         if hasOpenGroup {
             super.endUndoGrouping()

@@ -40,11 +40,10 @@ struct PilcrowApp: App {
 
         // Multi-File Search lives in its own scene so it stays on
         // screen while the user opens result files in editor tabs/
-        // windows. Same `requestOpenWindow` / dismiss-on-restore dance
-        // as the palette to keep iPadOS from restoring it as the
-        // launch surface.
-        WindowGroup("Multi-File Search", id: SceneID.multiFileSearch.rawValue) {
-            MultiFileSearchSheet()
+        // windows. Each request captures the originating editor session;
+        // its launch identity prevents restoring a stale utility window.
+        WindowGroup("Multi-File Search", id: SceneID.multiFileSearch.rawValue, for: UtilityWindowRequest.self) { request in
+            MultiFileSearchSheet(request: request.wrappedValue)
         }
         .defaultSize(width: 560, height: 640)
         .commandsRemoved()
@@ -54,17 +53,14 @@ struct PilcrowApp: App {
         // real window (not a modal sheet). The window stays open so
         // the user can pick file after file; each pick spawns a
         // new editor window via `CommandActions.routeOpenURL`.
-        WindowGroup("File Browser", id: SceneID.fileBrowser.rawValue) {
-            FileBrowserScene()
+        WindowGroup("File Browser", id: SceneID.fileBrowser.rawValue, for: UtilityWindowRequest.self) { request in
+            FileBrowserScene(request: request.wrappedValue)
         }
         .defaultSize(width: 720, height: 600)
         .commandsRemoved()
 
-        // Markdown Preview scene. Reads the focused editor's text
-        // and renders it through `marked.js` in a WKWebView. The user
-        // can then Share / Print → Save as PDF from the toolbar.
-        WindowGroup("Markdown Preview", id: SceneID.markdownPreview.rawValue) {
-            MarkdownPreviewScene()
+        WindowGroup("Markdown Preview", id: SceneID.markdownPreview.rawValue, for: UUID.self) { tabID in
+            MarkdownPreviewScene(tabID: tabID.wrappedValue)
         }
         .defaultSize(width: 720, height: 880)
         .commandsRemoved()
@@ -85,17 +81,19 @@ private struct WindowOpenerInstaller: View {
             .onAppear {
                 guard AppStateBus.shared.scenes.openWindow == nil else { return }
                 AppStateBus.shared.scenes.openWindow = { id in
-                    // New same-size windows stack exactly over an
-                    // existing window at the default spot — visually
-                    // confusing, but not fixable from the app: iPadOS
-                    // has no window-frame API (systemFrame is
-                    // Catalyst-only, SwiftUI WindowPlacement is
-                    // iOS-unavailable), and routing through a UIKit
-                    // activation request with
-                    // UIWindowSceneProminentPlacement was tested and
-                    // placed the window identically. Placement is the
-                    // system's call.
-                    openWindow(id: id.rawValue)
+                    switch id {
+                    case .editor:
+                        openWindow(id: id.rawValue, value: EditorRoute.newDocument())
+                    case .fileBrowser, .multiFileSearch:
+                        let request = UtilityWindowRequest(launchID: SessionsStore.shared.currentLaunchID,
+                            ownerSessionID: AppStateBus.shared.scenes.currentSession?.sceneUUID)
+                        openWindow(id: id.rawValue, value: request)
+                    default:
+                        openWindow(id: id.rawValue)
+                    }
+                }
+                AppStateBus.shared.scenes.openPreviewWindow = { tabID in
+                    openWindow(id: SceneID.markdownPreview.rawValue, value: tabID)
                 }
                 AppStateBus.shared.scenes.openEditorWindow = { route in
                     openWindow(id: SceneID.editor.rawValue, value: route)
@@ -107,60 +105,19 @@ private struct WindowOpenerInstaller: View {
 @MainActor
 final class AppDelegateBridge: NSObject, UIApplicationDelegate {
 
-    /// Captured when the process starts. The `≤ 5 s` window scopes
-    /// the cold-launch filter so user-initiated window opens later
-    /// in the session aren't second-guessed.
-    private let processStart = Date()
-
-    /// Flips true as soon as the first scene config is approved.
-    /// Without this, a fresh install (no records, no matches) had
-    /// every session destroyed and iPadOS kept spawning replacements
-    /// — an instant infinite create/destroy loop on launch. The
-    /// first scene per cold launch always passes; subsequent
-    /// cold-launch sessions go through the record-match filter.
-    private var hasAllowedAnyScene = false
-
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
-        if let item = options.shortcutItem {
-            apply(item)
-        }
-        // Cold-launch filter: iPadOS auto-restores every
-        // `UISceneSession` in its pool, including ones the user
-        // swiped away. We only keep the ones we have a backing
-        // SessionRecord for — those are the involuntary-kill
-        // survivors (memory pressure, reboot). User-swiped sessions
-        // are gone from our store via `didDiscardSceneSessions`,
-        // so they fail the check and get destroyed. After the cold-
-        // launch window everything is user-initiated (⌘N, +, etc.)
-        // and passes through. The "allow first scene" gate breaks
-        // the otherwise infinite destroy/respawn loop on fresh
-        // installs where no records exist yet.
-        let isColdLaunchWindow = Date().timeIntervalSince(processStart) < 5.0
-        if isColdLaunchWindow, hasAllowedAnyScene {
-            let persistentId = connectingSceneSession.persistentIdentifier
-            // `hasRecord(forPersistentIdentifier:)` is true only when
-            // we explicitly saved a record for this session — i.e.,
-            // it had content the user wants restored. An empty
-            // window or a swiped-away window has no record.
-            if !SessionsStore.shared.hasRecord(forPersistentIdentifier: persistentId) {
-                application.requestSceneSessionDestruction(
-                    connectingSceneSession,
-                    options: nil,
-                    errorHandler: nil
-                )
-            }
-        }
-        hasAllowedAnyScene = true
+        if let item = options.shortcutItem { apply(item) }
         return UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
     }
 
     /// Called after iPadOS permanently discards sessions. There is no
-    /// cancellable "should close" hook, so preserve any dirty window as a
-    /// local Recoverable Work record before removing it from auto-restoration.
+    /// confirmation opportunity when the process is already gone. Preserve
+    /// any work without an explicit Save/Don’t Save decision as exceptional
+    /// recovery; a deliberate close marks its live session before destruction.
     /// If the process was not running at close time, UIKit delivers this on
     /// the next launch and the same recovery path still applies.
     func application(
@@ -203,15 +160,9 @@ final class AppDelegateBridge: NSObject, UIApplicationDelegate {
                 forSceneUUID: $0.sceneUUID
             ) == persistentID
         }) {
+            guard !live.isClosingWindow else { return nil }
             do {
-                try await DraftsStore.shared.withCapEnforcementSuspended {
-                    for tab in live.tabs where tab.document.isDirty {
-                        if let liveText = tab.state.textView?.text {
-                            tab.document.text = liveText
-                        }
-                        try await tab.document.commitRecoverySnapshot()
-                    }
-                }
+                try await live.checkpointDocuments()
             } catch {
                 AppStateBus.shared.presentation.openErrorMessage =
                     "Couldn't finish preserving a closed window: \(error.localizedDescription)"
@@ -219,6 +170,7 @@ final class AppDelegateBridge: NSObject, UIApplicationDelegate {
                     forPersistentIdentifier: persistentID
                 )
             }
+            guard !live.isClosingWindow else { return nil }
             var record = SessionRecord(scene: live.sceneUUID, session: live)
             record.persistentIdentifier = persistentID
             return record

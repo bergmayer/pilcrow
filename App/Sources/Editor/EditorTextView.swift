@@ -19,6 +19,10 @@ struct EditorTextView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> PilcrowTextView {
+        if let previous = state.textView ?? state.siblingState?.textView,
+           let coordinator = previous.editorDelegate as? EditorTextViewCoordinator {
+            coordinator.flushBufferSnapshot(from: previous)
+        }
         let textView = PilcrowTextView()
         textView.editorDelegate = context.coordinator
         let initialThemeKey = EditorTextViewCoordinator.ThemeCacheKey(
@@ -40,10 +44,13 @@ struct EditorTextView: UIViewRepresentable {
             .editorBackgroundColor ?? .systemBackground
         context.coordinator.themeCacheKey = initialThemeKey
         textView.text = document.text
+        textView.selectedRange = state.selectedRange
         context.coordinator.lastPushedDocumentText = document.text
         textView.isFindInteractionEnabled = true
         textView.alwaysBounceVertical = true
-        textView.contentInsetAdjustmentBehavior = .always
+        // SwiftUI places the editor below chrome and above the keyboard.
+        // Reapplying UIKit's container insets can create a second header.
+        textView.contentInsetAdjustmentBehavior = .never
         KeyboardAccessoryBar.install(on: textView)
         textView.onFoldToggle = { [weak textView] body in
             guard let textView else { return }
@@ -84,13 +91,33 @@ struct EditorTextView: UIViewRepresentable {
         // gutter chevron (sibling overlays got buried under
         // `bringSubviewToFront(gutterContainerView)`).
 
+        if let sibling = state.siblingState?.textView {
+            textView.shareUndoHistory(with: sibling)
+        }
         state.textView = textView
+        textView.restoreOnLayout = state.pendingViewport ?? state.viewport
+        state.pendingViewport = nil
         applyFocusRequestIfNeeded(to: textView, context: context)
         return textView
     }
 
+    static func dismantleUIView(_ textView: PilcrowTextView, coordinator: EditorTextViewCoordinator) {
+        coordinator.state.viewport = EditorViewport(state: coordinator.state)
+        coordinator.flushBufferSnapshot(from: textView)
+        coordinator.overlayRefreshTask?.cancel()
+        textView.editorDelegate = nil
+        if coordinator.state.textView === textView {
+            coordinator.state.textView = nil
+        }
+    }
+
     func updateUIView(_ textView: PilcrowTextView, context: Context) {
         synchronizeDocumentText(with: textView, coordinator: context.coordinator)
+        if let viewport = state.pendingViewport, !document.isLoading {
+            textView.restoreOnLayout = viewport
+            state.pendingViewport = nil
+            textView.setNeedsLayout()
+        }
         applyTypingPreferences(to: textView)
         applyViewSettings(to: textView)
         applyOverscroll(to: textView)
@@ -265,15 +292,10 @@ struct EditorTextView: UIViewRepresentable {
         }
     }
 
-    /// Ten lines of `contentInset.bottom` cushion so the final
-    /// line doesn't pin to the window edge.
+    /// Extend the scrollable document instead of subtracting padding from
+    /// its visible viewport. This remains usable in a short iPad window.
     private func applyOverscroll(to textView: PilcrowTextView) {
-        let font = state.font.uiFont(size: CGFloat(state.fontSize))
-        let perLine = font.lineHeight * CGFloat(state.lineHeight)
-        let target: CGFloat = state.overscroll ? perLine * 10 : 0
-        if abs(textView.contentInset.bottom - target) > 0.5 {
-            textView.contentInset.bottom = target
-        }
+        textView.verticalOverscrollFactor = state.overscroll ? 0.5 : 0
     }
 
     private func applyIndentStrategy(to textView: PilcrowTextView) {
@@ -362,28 +384,22 @@ extension PilcrowTextView {
     }
 
     func selectCurrentWord() {
-        let nsText = text as NSString
-        let location = selectedRange.location
-        let length = nsText.length
-        guard length > 0 else { return }
-
-        let alnum = CharacterSet.alphanumerics
-        var start = min(location, length - 1)
-        var end = start
-
-        while start > 0,
-              let scalar = nsText.substring(with: NSRange(location: start - 1, length: 1)).unicodeScalars.first,
-              alnum.contains(scalar) || scalar == "_" {
-            start -= 1
+        let source = text
+        let cursor = min(max(0, selectedRange.location), (source as NSString).length)
+        var previous: NSRange?
+        var found: NSRange?
+        source.enumerateSubstrings(in: source.startIndex..., options: [.byWords, .substringNotRequired]) { _, range, _, stop in
+            let word = NSRange(range, in: source)
+            if NSLocationInRange(cursor, word) {
+                found = word
+                stop = true
+            } else if NSMaxRange(word) == cursor {
+                previous = word
+            } else if word.location > cursor {
+                stop = true
+            }
         }
-        while end < length,
-              let scalar = nsText.substring(with: NSRange(location: end, length: 1)).unicodeScalars.first,
-              alnum.contains(scalar) || scalar == "_" {
-            end += 1
-        }
-        if end > start {
-            selectedRange = NSRange(location: start, length: end - start)
-        }
+        if let range = found ?? previous { selectedRange = range }
     }
 
     func selectCurrentLine() {

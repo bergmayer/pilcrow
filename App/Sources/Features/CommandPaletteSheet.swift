@@ -12,6 +12,8 @@ import SwiftUI
 /// the current drill-down.
 struct CommandPaletteSheet: View {
 
+    let onSelect: (EditorCommandSpec) -> Void
+
     @Environment(\.dismiss) private var dismiss
     @State private var query: String = ""
     @State private var selectedGroup: MenuGroup?
@@ -281,13 +283,8 @@ struct CommandPaletteSheet: View {
     }
 
     private func run(_ command: EditorCommandSpec) {
+        onSelect(command)
         dismiss()
-        // Defer briefly so the sheet animates away and the editor
-        // reclaims first-responder before the command runs.
-        Task { @MainActor in
-            try? await Task.sleep(for: Timing.paletteHandoff)
-            command.action()
-        }
     }
 }
 

@@ -19,48 +19,39 @@ struct EditorView: View {
 
     @Bindable private var bus = AppStateBus.shared
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.scenePhase) private var scenePhase
     @Bindable private var prefs = AppPreferencesStore.shared
     /// Fraction at divider-drag start; DragGesture translation is
     /// cumulative, so deltas must apply against this anchor, not the
     /// already-updated live fraction.
     @State private var dividerDragStartFraction: CGFloat?
-    /// SwiftUI's keyboard safe area is shared too broadly under iPad
-    /// multiwindow. Track only the keyboard overlap for this view's key
-    /// window so background scenes keep their chrome at the window edge.
-    @State private var keyboardOverlap: CGFloat = 0
+    @State private var commandAfterDismiss: (() -> Void)?
+
+    private var selectedPane: EditorState {
+        if let focused = bus.scenes.currentEditor, currentTab?.owns(focused) == true { return focused }
+        return state
+    }
 
     var body: some View {
         observeStateForEngineUpdates()
-        // The editor ignores the process-wide SwiftUI keyboard safe area;
-        // UITextView scrolls the cursor itself. A window-local UIKit bridge
-        // lifts only this key window's status bar by its actual overlap.
-        return ZStack(alignment: .bottom) {
-            VStack(spacing: 0) {
-                // No transition between launcher and editor: nav title +
-                // accessory bar + keyboard animations made the kind-flip
-                // visibly janky on iPhone when a new tab was created.
-                Group {
-                    if let override = tabContentOverride {
-                        override
-                    } else {
-                        splitOrSingleEditor
-                    }
+        // The scene owns keyboard avoidance. Keep chrome in the layout so
+        // a short viewport cannot put its last line behind the status bar.
+        return VStack(spacing: 0) {
+            recoveryFailureBanner
+            // Native panes stay mounted through split and size changes.
+            Group {
+                if let override = tabContentOverride {
+                    override
+                } else {
+                    splitOrSingleEditor
                 }
-                .frame(maxHeight: .infinity)
             }
+            .frame(maxHeight: .infinity)
 
             if state.showStatusBar {
-                EditorStatusBar(document: document, state: state)
-                    .padding(.bottom, keyboardOverlap)
-                    .animation(.easeOut(duration: 0.25), value: keyboardOverlap)
+                EditorStatusBar(document: document, state: state, selection: selectedPane.selectedRange)
             }
         }
-        .background {
-            WindowKeyboardOverlapReader { overlap in
-                keyboardOverlap = overlap
-            }
-        }
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         // Non-modal so the editor stays editable while the user browses
         // metadata or the outline.
         .inspector(isPresented: Binding(
@@ -75,36 +66,36 @@ struct EditorView: View {
             if document.isLoading { loadingOverlay }
         }
         // isActive gate: shared bus flag surfaces only on the focused window.
-        .sheet(item: isActive ? $bus.presentation.presentedSheet : .constant(nil)) { sheet in
+        .sheet(
+            item: ownsPresentedSheet ? $bus.presentation.presentedSheet : .constant(nil),
+            onDismiss: {
+                let action = commandAfterDismiss
+                commandAfterDismiss = nil
+                // Commands may change first responder or present another dialog.
+                // Leave SwiftUI's sheet update before executing those side effects.
+                if let action { Task { @MainActor in action() } }
+            }
+        ) { sheet in
             sheetContent(for: sheet)
+        }
+        .sheet(item: Binding(get: { state.documentShare }, set: { state.documentShare = $0 })) { share in
+            DocumentShareSheet(share: share)
         }
         // `.alert` not `.confirmationDialog`: iPad popover-with-tail needs
         // an anchor, and close paths come from disparate places (tab
         // strip, switcher, ⌘W, palette) with no single sensible anchor.
         // Each alert is its own ViewModifier — the trailing-closure
         // alert API counts heavily against the type-checker budget and
-        // stacking three of them inline tipped the body over again.
+        // stacking them inline previously exceeded that budget.
         .modifier(OpenErrorAlertModifier(
             presented: openErrorAlertBinding,
             message: bus.presentation.openErrorMessage
-        ))
-        .modifier(PendingCloseAlertModifier(
-            presented: pendingCloseBinding,
-            pending: bus.presentation.pendingClose
         ))
         .modifier(StaleSourceAlertModifier(
             title: staleAlertTitle,
             presented: staleCheckBinding,
             check: bus.presentation.sourceStaleCheck,
             cancel: { bus.presentation.sourceStaleCheck = nil }
-        ))
-        // Fires for Close Other / Close to Right / Close All when at least
-        // one tab in the set is dirty. Extracted for same type-checker
-        // reason as the stale alert.
-        .modifier(BatchCloseAlertModifier(
-            presented: pendingBatchCloseBinding,
-            pending: bus.presentation.pendingBatchClose,
-            message: batchCloseMessage
         ))
         .onAppear {
             primeStateFromDocument()
@@ -119,6 +110,33 @@ struct EditorView: View {
         // ensureSecondaryState mutates @Observable state, so it can't
         // run during body. Create the pane state here and let body
         // render the split once `secondaryState` exists.
+        .task(id: SourceObservationRequest(url: document.fileURL, saving: document.isSaving,
+                                           active: scenePhase == .active)) {
+            guard let tab = currentTab, tab.kind == .editor, let url = document.fileURL,
+                  scenePhase == .active, !document.isSaving else { return }
+            let observation = SourceFileObservation(url: url)
+            defer { observation.stop() }
+            for await currentURL in observation.events {
+                guard !Task.isCancelled else { return }
+                if currentURL != url, document.fileURL == url {
+                    document.fileURL = currentURL
+                    state.fileURL = currentURL
+                    state.siblingState?.fileURL = currentURL
+                    document.revisionKey = RevisionStore.key(for: currentURL)
+                    RecentFilesStore.shared.record(currentURL)
+                }
+                await DocumentWorkflow.refreshExternalSource(tab, at: currentURL)
+            }
+        }
+        .task(id: WritingStatistics.Request(text: document.text, selection: selectedPane.selectedRange,
+                    encoding: document.fileEncoding.encoding.rawValue, utf8BOM: document.fileEncoding.withUTF8BOM)) {
+            let request = WritingStatistics.Request(text: document.text, selection: selectedPane.selectedRange,
+                encoding: document.fileEncoding.encoding.rawValue, utf8BOM: document.fileEncoding.withUTF8BOM)
+            let previous = state.writingStatistics
+            let worker = Task.detached(priority: .utility) { WritingStatistics(request, reusing: previous) }
+            let statistics = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+            if !Task.isCancelled { state.writingStatistics = statistics }
+        }
         .onChange(of: state.splitOpen) { _, open in
             if open { _ = currentTab?.ensureSecondaryState() }
         }
@@ -130,14 +148,14 @@ struct EditorView: View {
         // field on EditorState is a computed read through
         // AppPreferencesStore, so Settings changes show up via Observation
         // without an explicit .onChange chain. The remaining observers
-        // (encoding/lineEnding mirror, autosave debounce, spell-check
+        // (encoding/lineEnding mirror, recovery checkpoints, spell-check
         // toggle, tap-to-suggest) live in EditorObserversModifier — see
         // its file for the per-handler rationale.
         .modifier(EditorObserversModifier(
             document: document,
             state: state,
             onBufferEdit: {
-                scheduleAutoSave()
+                state.scheduleAutoSave(for: document)
                 scheduleLiveSpellCheckIfEnabled()
             }
         ))
@@ -163,50 +181,12 @@ struct EditorView: View {
         }
     }
 
+    private var ownsPresentedSheet: Bool {
+        let owner = bus.presentation.presentedSheetOwner
+        return owner === state || owner?.siblingState === state || (owner == nil && isActive)
+    }
+
     private var isActive: Bool { bus.scenes.isActive(state) }
-
-    /// Match by session id so the dialog fires on the originating window
-    /// even when focus has shifted by the time the user answers.
-    private var pendingCloseBinding: Binding<Bool> {
-        Binding(
-            get: {
-                guard let pending = bus.presentation.pendingClose else { return false }
-                let mySession = bus.scenes.allOpenSessions.first { session in
-                    session.tabs.contains { $0.state === state }
-                }
-                // Registry-stale fallback: show on active rather than
-                // silently drop (the don't-lose-user-data path).
-                guard let mySession else { return isActive }
-                return ObjectIdentifier(mySession) == pending.sessionID
-            },
-            set: { newValue in
-                if !newValue { bus.presentation.pendingClose = nil }
-            }
-        )
-    }
-
-    /// Renders the alert only in the window that owns the closing tabs.
-    private var pendingBatchCloseBinding: Binding<Bool> {
-        Binding(
-            get: {
-                guard let pending = bus.presentation.pendingBatchClose,
-                      let mySession = session
-                else { return false }
-                return ObjectIdentifier(mySession) == pending.sessionID
-            },
-            set: { newValue in
-                if !newValue { bus.presentation.pendingBatchClose = nil }
-            }
-        )
-    }
-
-    private func batchCloseMessage(_ pending: PendingBatchClose) -> String {
-        let scope = pending.description
-        let suffix = pending.dirtyCount == 1
-            ? "1 of them has unsaved changes."
-            : "\(pending.dirtyCount) of them have unsaved changes."
-        return "\(scope). \(suffix) Save to Drafts keeps the edits in the unsaved-drafts list so you can pick them up later; Discard throws them away."
-    }
 
     /// Only the owning scene presents — otherwise every window stacks it.
     private var staleCheckBinding: Binding<Bool> {
@@ -253,7 +233,7 @@ struct EditorView: View {
     }
 
     private var documentTitle: String {
-        document.displayName
+        currentTab?.kind == .editor ? document.displayName : "Pilcrow"
     }
 
     /// "edited" hint + location, middle-dot joined. Brand-new Untitled
@@ -380,37 +360,35 @@ struct EditorView: View {
         return "Loading \(name)\nfrom \(provider)…"
     }
 
-    /// Two editors over the same document; pane size tracks splitFraction.
-    /// Reads the already-created `secondaryState` (never creates it here —
-    /// that mutates @Observable state during view update); until the
-    /// onChange trigger lands, the single editor renders.
-    @ViewBuilder
+    /// Keep both mounted panes stable through split toggles and rotation.
+    /// Undo operations may target either pane, including the hidden one.
     private var splitOrSingleEditor: some View {
-        if state.splitOpen, let secondary = currentTab?.secondaryState {
-            GeometryReader { proxy in
-                switch state.splitOrientation {
-                case .horizontal:
-                    let total = max(proxy.size.width, 1)
-                    let leftWidth = max(120, min(total - 120, total * state.splitFraction))
-                    HStack(spacing: 0) {
-                        EditorTextView(document: document, state: state)
-                            .frame(width: leftWidth)
-                        splitDivider(in: total, axis: .horizontal)
-                        EditorTextView(document: document, state: secondary)
-                    }
-                case .vertical:
-                    let total = max(proxy.size.height, 1)
-                    let topHeight = max(120, min(total - 120, total * state.splitFraction))
-                    VStack(spacing: 0) {
-                        EditorTextView(document: document, state: state)
-                            .frame(height: topHeight)
-                        splitDivider(in: total, axis: .vertical)
-                        EditorTextView(document: document, state: secondary)
-                    }
+        GeometryReader { proxy in
+            let horizontal = state.splitOrientation == .horizontal
+            let total = max(horizontal ? proxy.size.width : proxy.size.height, 1)
+            let available = max(total - 6, 0)
+            let minimum = min(120, available / 2)
+            let primarySize = max(minimum, min(available - minimum, available * state.splitFraction))
+            let secondary = currentTab?.secondaryState
+            let isSplit = state.splitOpen && secondary != nil
+            let layout = horizontal ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+            layout {
+                EditorTextView(document: document, state: state)
+                    .frame(width: isSplit && horizontal ? primarySize : nil,
+                           height: isSplit && !horizontal ? primarySize : nil)
+                if let secondary {
+                    splitDivider(in: total, axis: state.splitOrientation)
+                        .frame(width: isSplit ? nil : 0, height: isSplit ? nil : 0)
+                        .clipped()
+                        .allowsHitTesting(isSplit)
+                    EditorTextView(document: document, state: secondary)
+                        .frame(width: isSplit ? nil : 0, height: isSplit ? nil : 0)
+                        .clipped()
+                        .opacity(isSplit ? 1 : 0)
+                        .allowsHitTesting(isSplit)
+                        .accessibilityHidden(!isSplit)
                 }
             }
-        } else {
-            EditorTextView(document: document, state: state)
         }
     }
 
@@ -447,31 +425,65 @@ struct EditorView: View {
     /// Beats the iPad Stage Manager / Split View race where scenePhase
     /// fires late and the sheet would land on the wrong window.
     private func claimFocus() {
-        bus.scenes.claimFocus(state: state)
+        bus.scenes.claimFocus(preservingPaneOf: state)
     }
 
 
-    /// ~800 ms after last edit. URL-backed → autoSave (write+revision);
-    /// untitled → autoSnapshot (revision only, since sandbox demands a
-    /// user-granted location). loadAsync opts out to avoid echoing.
-    private func scheduleAutoSave() {
-        guard !document.isLoading, document.isDirty else { return }
-        state.autoSaveTask?.cancel()
-        state.autoSaveTask = Task { @MainActor [weak document, weak state] in
-            defer { state?.autoSaveTask = nil }
-            try? await Task.sleep(for: Timing.autoSaveDebounce)
-            if Task.isCancelled { return }
-            guard let document, document.isDirty else { return }
-            // Engine live buffer; document.text is a 300 ms snapshot and
-            // one dropped tick would autosave stale bytes.
-            if let live = state?.textView?.text {
-                document.text = live
+    @ViewBuilder
+    private var recoveryFailureBanner: some View {
+        if state.transformTask != nil {
+            HStack {
+                ProgressView("Running transform…")
+                Spacer()
+                Button("Cancel") { state.transformTask?.cancel() }
             }
-            if document.fileURL != nil {
-                document.autoSave()
-            } else {
-                document.autoSnapshot()
+            .padding(12)
+            .background(.bar)
+        }
+        if let error = state.operationError {
+            HStack {
+                Text(error)
+                Spacer()
+                Button("Dismiss") { state.operationError = nil }
             }
+            .font(.callout)
+            .padding(12)
+            .background(.bar)
+        }
+        if let message = document.externalChangeMessage {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(message, systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                HStack {
+                    Button("Reload…") { claimFocus(); CommandActions.revertToSaved() }
+                    Button("Save As…") { claimFocus(); CommandActions.saveFileAs() }
+                }
+                .buttonStyle(.bordered)
+            }
+            .font(.callout)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.yellow.opacity(0.12))
+        }
+        if let error = document.recoveryError {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Recovery copy couldn’t be updated", systemImage: "exclamationmark.triangle")
+                    .font(.headline)
+                Text(error).font(.caption)
+                HStack {
+                    Button("Retry Recovery") {
+                        document.text = state.textView?.text ?? document.text
+                        document.autoSave()
+                    }
+                    Button("Save…") {
+                        claimFocus()
+                        CommandActions.saveFile()
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(.bar)
         }
     }
 
@@ -481,9 +493,9 @@ struct EditorView: View {
         guard state.spellCheck, !document.isLoading else { return }
         state.liveSpellTask?.cancel()
         state.liveSpellTask = Task { @MainActor [weak state] in
-            defer { state?.liveSpellTask = nil }
             try? await Task.sleep(for: .milliseconds(400))
             if Task.isCancelled { return }
+            defer { state?.liveSpellTask = nil }
             state?.textView?.highlightAllMisspellings()
         }
     }
@@ -527,10 +539,23 @@ struct EditorView: View {
         case .characterInspector:
             CharacterInspectorSheet(text: document.text, range: state.selectedRange)
         case .sortLines:
+            let target = LineEditTarget(text: state.textView?.text ?? document.text,
+                                        selection: state.textView?.selectedRange ?? state.selectedRange)
             SortLinesSheet(
-                text: state.textView?.text ?? document.text,
+                text: target.text,
                 lineEnding: document.lineEnding,
-                onApply: { sorted in replaceWholeBuffer(with: sorted) }
+                scopeLabel: target.isSelection ? "Selected Lines" : "Whole Document",
+                onApply: { sorted in
+                    guard sorted != target.text else { return }
+                    guard let editor = state.textView, editor.text == target.source else {
+                        bus.presentation.openErrorMessage = "The document changed. Select the lines and sort again."
+                        return
+                    }
+                    editor.undoManager?.endUndoGrouping()
+                    editor.replace(target.range, withText: sorted)
+                    editor.undoManager?.endUndoGrouping()
+                    editor.setSelection(NSRange(location: target.range.location, length: (sorted as NSString).length))
+                }
             )
         case .goToLine:
             GoToLineSheet(
@@ -545,15 +570,9 @@ struct EditorView: View {
             InsertLoremIpsumSheet()
         case .snippetsManager:
             SnippetsManagerSheet()
-        case .draftsRecovery:
-            DraftsRecoverySheet()
         case .templatePicker:
             TemplatePickerSheet { template in
-                TemplateWorkflow.apply(
-                    template,
-                    document: document,
-                    state: state
-                )
+                if let tab = currentTab { TemplateWorkflow.apply(template, to: tab) }
             }
         case .clipboardHistory:
             ClipboardHistorySheet()
@@ -564,11 +583,18 @@ struct EditorView: View {
         case .revisions:
             RevisionsSheet(document: document)
         case .commandPalette:
-            CommandPaletteSheet()
+            CommandPaletteSheet { command in
+                let owner = selectedPane
+                commandAfterDismiss = {
+                    CommandActions.perform(for: owner) {
+                        if command.isEnabled() { command.action() }
+                    }
+                }
+            }
         case .fileBrowser:
-            FileBrowserSheetView()
+            FileBrowserSheetView(owner: session)
         case .multiFileSearch:
-            MultiFileSearchSheet()
+            MultiFileSearchSheet(owner: session)
         case .preferences:
             NavigationStack { PreferencesView() }
         case .tabSwitcher:
@@ -584,7 +610,7 @@ struct EditorView: View {
         case .markdownTable:
             MarkdownTableSheet()
         case .markdownPreview:
-            MarkdownPreviewSheet()
+            MarkdownPreviewSheet(document: document)
         case .organizeFootnotes:
             OrganizeFootnotesSheet()
         case .spellCheck:
@@ -617,137 +643,8 @@ struct EditorView: View {
     }
 }
 
-// MARK: - Window-local keyboard overlap
-
-/// Reports the docked keyboard's overlap with this specific editor view.
-/// SwiftUI's keyboard safe area can leak from the key Stage Manager window
-/// into sibling scenes; UIKit gives us the notification frame and the owning
-/// window needed to keep the calculation scene-local.
-struct WindowKeyboardOverlapReader: UIViewRepresentable {
-
-    let onChange: @MainActor (CGFloat) -> Void
-
-    func makeUIView(context: Context) -> WindowKeyboardOverlapView {
-        WindowKeyboardOverlapView(onChange: onChange)
-    }
-
-    func updateUIView(_ view: WindowKeyboardOverlapView, context: Context) {
-        view.onChange = onChange
-        view.refreshOverlap()
-    }
-}
-
-@MainActor
-final class WindowKeyboardOverlapView: UIView {
-
-    var onChange: @MainActor (CGFloat) -> Void
-
-    private var keyboardFrameInScreen: CGRect?
-    private var lastReportedOverlap: CGFloat = -1
-
-    init(onChange: @escaping @MainActor (CGFloat) -> Void) {
-        self.onChange = onChange
-        super.init(frame: .zero)
-        isUserInteractionEnabled = false
-        backgroundColor = .clear
-
-        let center = NotificationCenter.default
-        center.addObserver(
-            self,
-            selector: #selector(keyboardWillChangeFrame(_:)),
-            name: UIResponder.keyboardWillChangeFrameNotification,
-            object: nil
-        )
-        center.addObserver(
-            self,
-            selector: #selector(keyboardWillHide(_:)),
-            name: UIResponder.keyboardWillHideNotification,
-            object: nil
-        )
-        center.addObserver(
-            self,
-            selector: #selector(windowKeyStateChanged(_:)),
-            name: UIWindow.didBecomeKeyNotification,
-            object: nil
-        )
-        center.addObserver(
-            self,
-            selector: #selector(windowKeyStateChanged(_:)),
-            name: UIWindow.didResignKeyNotification,
-            object: nil
-        )
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-    }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        refreshOverlap()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        refreshOverlap()
-    }
-
-    @objc private func keyboardWillChangeFrame(_ notification: Notification) {
-        keyboardFrameInScreen = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
-        refreshOverlap()
-    }
-
-    @objc private func keyboardWillHide(_ notification: Notification) {
-        keyboardFrameInScreen = nil
-        refreshOverlap()
-    }
-
-    @objc private func windowKeyStateChanged(_ notification: Notification) {
-        guard notification.object as? UIWindow === window else { return }
-        refreshOverlap()
-    }
-
-    func refreshOverlap() {
-        let overlap: CGFloat
-        if let window,
-           window.isKeyWindow,
-           let keyboardFrameInScreen {
-            let localKeyboardFrame = convert(
-                keyboardFrameInScreen,
-                from: window.screen.coordinateSpace
-            )
-            overlap = WindowKeyboardGeometry.bottomOverlap(
-                viewBounds: bounds,
-                keyboardFrame: localKeyboardFrame
-            )
-        } else {
-            overlap = 0
-        }
-
-        guard abs(overlap - lastReportedOverlap) > 0.5 else { return }
-        lastReportedOverlap = overlap
-        DispatchQueue.main.async { [weak self] in
-            self?.onChange(overlap)
-        }
-    }
-}
-
-enum WindowKeyboardGeometry {
-
-    /// Floating keyboards do not move full-width chrome. Only a keyboard
-    /// intersecting the view's bottom edge contributes an overlap.
-    static func bottomOverlap(viewBounds: CGRect, keyboardFrame: CGRect) -> CGFloat {
-        let intersection = viewBounds.intersection(keyboardFrame)
-        guard !viewBounds.isEmpty,
-              !intersection.isNull,
-              keyboardFrame.maxY >= viewBounds.maxY - 1,
-              intersection.width >= viewBounds.width * 0.5
-        else { return 0 }
-
-        return intersection.height
-    }
+private struct SourceObservationRequest: Equatable {
+    let url: URL?
+    let saving: Bool
+    let active: Bool
 }

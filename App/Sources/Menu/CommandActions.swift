@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import struct EditorEngine.BatchReplaceSet
 import AVFoundation
 import FileEncoding
 import LineEnding
@@ -20,9 +21,8 @@ enum CommandActions {
         Self.context.scenes.currentSession?.newTab()
     }
 
-    /// Creates the destination tab first, then asks for a template. If the
-    /// picker is cancelled the result is still the same harmless blank tab
-    /// as an ordinary New action.
+    /// Creates a blank document first, then asks for a template. Canceling
+    /// leaves that blank document, regardless of the New Tab preference.
     static func newFromTemplate() {
         guard let session = Self.context.scenes.currentSession else { return }
         let tab = session.newTab(kind: .editor)
@@ -36,7 +36,8 @@ enum CommandActions {
 
     static func saveFile() {
         guard let session = Self.context.scenes.currentSession else { return }
-        saveDocumentSafely(session.activeTab, session: session)
+        let tab = session.activeTab
+        Task { @MainActor in await saveDocumentSafely(tab) }
     }
 
     static func saveFileAs() {
@@ -59,47 +60,31 @@ enum CommandActions {
         Self.context.presentation.present(.commandPalette, owner: Self.context.scenes.currentEditor)
     }
 
-    /// Window destination: one fresh browser scene per pick. Tab
-    /// destination: sheet on the active editor — picks add tabs to
-    /// the same session.
     static func presentFileBrowser() {
-        switch DocumentDestination.current() {
+        presentFileBrowser(forceDestination: DocumentDestination.current())
+    }
+
+    static func presentFileBrowser(forceDestination destination: DocumentDestination) {
+        switch destination {
         case .window:
-            Self.context.scenes.requestOpenWindow(.fileBrowser)
             Self.context.scenes.openWindow?(.fileBrowser)
         case .tab:
             Self.context.presentation.present(.fileBrowser, owner: Self.context.scenes.currentEditor)
         }
     }
 
-    /// Replaces the old `SceneRouter.routeOpenURL` closure. Caller is
-    /// any URL-producing surface (FileBrowser, DocumentPicker) that
-    /// has no scene of its own — resolves the active session here
-    /// and dispatches per `DocumentDestination`.
-    static func routeOpenURL(_ url: URL) {
-        let destination = DocumentDestination.current()
-        Self.context.pending.nextOpenDestinationOverride = nil
-        switch destination {
-        case .window:
-            Self.context.pending.newWindow = url
-            Self.context.scenes.openWindow?(.editor)
-        case .tab:
-            guard let session = Self.context.scenes.currentSession else {
-                Self.context.pending.newWindow = url
-                Self.context.scenes.openWindow?(.editor)
-                return
-            }
+    /// Picker callbacks pass their captured session/destination. Immediate
+    /// menu actions may use the currently focused session.
+    static func routeOpenURL(_ url: URL, in owner: EditorSession? = nil,
+                             destination: DocumentDestination = DocumentDestination.current(), line: Int? = nil) {
+        if destination == .tab, let session = owner ?? Self.context.scenes.currentSession {
             let tab = session.newTab(kind: .editor)
-            DocumentWorkflow.open(url, in: tab)
+            DocumentWorkflow.open(url, in: tab, goToLine: line)
+        } else if let open = Self.context.scenes.openEditorWindow {
+            open(.openDocument(url, line: line))
+        } else {
+            Self.context.presentation.openErrorMessage = "A new editor window isn't available yet. Try opening the file again."
         }
-    }
-
-    /// One-shot destination override for "Open in New Tab…" /
-    /// "Open in New Window…". Cleared by `EditorScene.route(open:)`
-    /// once the picked URL lands.
-    static func presentFileBrowser(forceDestination destination: DocumentDestination) {
-        Self.context.pending.nextOpenDestinationOverride = destination
-        presentFileBrowser()
     }
 
     /// Inline browser tab — UIDocumentBrowserViewController hosted
@@ -120,6 +105,26 @@ enum CommandActions {
     // MARK: - Undo / Redo
 
     /// The app-owned text view is a responder and supplies its undo manager.
+    static func copySelection() {
+        guard let editor = actions, editor.selectedRange.length > 0,
+              let text = editor.text(in: editor.selectedRange) else { return }
+        UIPasteboard.general.string = text
+        ClipboardHistory.shared.capture()
+    }
+
+    static func cutSelection() {
+        guard let editor = actions, editor.selectedRange.length > 0 else { return }
+        copySelection()
+        editor.replaceText(in: EditorEngine.BatchReplaceSet(replacements: [.init(range: editor.selectedRange, text: "")]))
+    }
+
+    static func paste() {
+        guard let editor = actions, let text = UIPasteboard.general.string else { return }
+        editor.undoManager?.endUndoGrouping()
+        editor.replace(editor.selectedRange, withText: text)
+        editor.undoManager?.endUndoGrouping()
+    }
+
     static func undo() {
         actions?.undoManager?.undo()
     }
@@ -136,6 +141,11 @@ enum CommandActions {
     /// interacted with (or, for menu-bar invocations, the frontmost).
     static func showTabSwitcher() {
         guard let session = Self.context.scenes.currentSession else { return }
+        if !session.tabSwitcherActive {
+            let tab = session.activeTab
+            tab.state.textView?.resignFirstResponder()
+            tab.secondaryState?.textView?.resignFirstResponder()
+        }
         withAnimation(.appSwitcherMorph) {
             session.tabSwitcherActive.toggle()
         }
@@ -143,8 +153,7 @@ enum CommandActions {
 
     static func openCurrentDocumentInNewWindow() {
         guard let url = Self.context.scenes.currentEditor?.fileURL else { return }
-        Self.context.pending.newWindow = url
-        Self.context.scenes.openWindow?(.editor)
+        Self.context.scenes.openEditorWindow?(.openDocument(url))
     }
 
     // MARK: - Sidebar / inspector / split
@@ -317,14 +326,13 @@ enum CommandActions {
     /// Copies the live buffer from the frontmost tab. Reading the text view
     /// first avoids losing keystrokes that have not reached the document's
     /// debounced model snapshot yet.
-    static func copyAll() {
+    static func copyAll(to pasteboard: UIPasteboard = .general) {
         guard let tab = Self.session?.activeTab, tab.kind == .editor else { return }
-        UIPasteboard.general.string = tab.state.textView?.text ?? tab.document.text
+        pasteboard.string = tab.state.textView?.text ?? tab.document.text
     }
 
     static func presentSnippetsManager()   { presentSheet(.snippetsManager) }
     static func presentClipboardHistory()  { presentSheet(.clipboardHistory) }
-    static func presentDraftsRecovery()    { presentSheet(.draftsRecovery) }
     static func presentProcessLines()      { presentSheet(.processLines) }
     static func presentCanonize()          { presentSheet(.canonize) }
     static func presentCharacterPanel()    { presentSheet(.characterPanel) }
@@ -465,97 +473,24 @@ enum CommandActions {
 
     // MARK: - Query Replace
 
-    struct QueryReplaceMatch {
-        let range: NSRange
-        let replacement: String
-    }
+    typealias QueryReplaceMatch = DocumentSearch.Match
 
     static func nextQueryReplaceMatch(
-        query: String,
-        replacement: String,
-        useRegex: Bool,
-        caseSensitive: Bool,
-        startingAt cursor: Int,
-        searchUpTo upperBound: Int? = nil,
-        preferLast: Bool = false
+        query: String, replacement: String, useRegex: Bool, caseSensitive: Bool,
+        startingAt cursor: Int, searchUpTo upperBound: Int? = nil, preferLast: Bool = false
     ) throws -> QueryReplaceMatch? {
-        guard let textView = actions, !query.isEmpty else { return nil }
-        let nsText = textView.text as NSString
-        let totalLength = nsText.length
-        let cap = min(upperBound ?? totalLength, totalLength)
-        guard cursor >= 0, cursor < cap else { return nil }
-        let searchRange = NSRange(location: cursor, length: cap - cursor)
-
-        if useRegex {
-            return try regexQueryReplaceMatch(
-                in: textView.text,
-                query: query,
-                replacement: replacement,
-                caseSensitive: caseSensitive,
-                range: searchRange,
-                preferLast: preferLast
-            )
-        }
-        return literalQueryReplaceMatch(
-            in: nsText,
-            query: query,
-            replacement: replacement,
-            caseSensitive: caseSensitive,
-            range: searchRange,
-            preferLast: preferLast
-        )
-    }
-
-    private static func regexQueryReplaceMatch(
-        in text: String,
-        query: String,
-        replacement: String,
-        caseSensitive: Bool,
-        range: NSRange,
-        preferLast: Bool
-    ) throws -> QueryReplaceMatch? {
-        let options: NSRegularExpression.Options = caseSensitive ? [] : [.caseInsensitive]
-        guard let regex = try? NSRegularExpression(pattern: query, options: options) else {
-            throw LineMatchError.invalidRegex(query)
-        }
-        let match = preferLast
-            ? regex.matches(in: text, range: range).last
-            : regex.firstMatch(in: text, range: range)
-        guard let match else { return nil }
-        let replaced = regex.replacementString(
-            for: match,
-            in: text,
-            offset: 0,
-            template: replacement
-        )
-        return QueryReplaceMatch(range: match.range, replacement: replaced)
-    }
-
-    private static func literalQueryReplaceMatch(
-        in text: NSString,
-        query: String,
-        replacement: String,
-        caseSensitive: Bool,
-        range: NSRange,
-        preferLast: Bool
-    ) -> QueryReplaceMatch? {
-        var options: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
-        if preferLast { options.insert(.backwards) }
-        let match = text.range(of: query, options: options, range: range)
-        guard match.location != NSNotFound else { return nil }
-        return QueryReplaceMatch(range: match, replacement: replacement)
-    }
-
-    static func applyQueryReplaceMatch(_ match: QueryReplaceMatch) {
-        guard let textView = actions else { return }
-        textView.replace(match.range, withText: match.replacement)
-        commitTextChange()
+        guard let textView = actions else { return nil }
+        let search = try DocumentSearch(text: textView.text, context: FindContext(
+            query: query, replacement: replacement, useRegex: useRegex, caseSensitive: caseSensitive))
+        let end = min(upperBound ?? (search.text as NSString).length, (search.text as NSString).length)
+        guard cursor >= 0, cursor <= end else { return nil }
+        let matches = search.matches(in: NSRange(location: cursor, length: end - cursor))
+        return preferLast ? matches.last : matches.first
     }
 
     static func revealMatch(_ match: QueryReplaceMatch) {
-        guard let textView = actions else { return }
-        textView.setSelection(match.range)
-        textView.scrollSelectionToVisible()
+        actions?.setSelection(match.range)
+        actions?.scrollSelectionToVisible()
     }
 
     // MARK: - Helpers
@@ -564,7 +499,18 @@ enum CommandActions {
     /// in isolation. Every helper below routes through `Self.context`.
     static var context: any CommandContext = AppStateBus.shared
 
+    private static weak var invocationOwner: EditorState?
+
+    static func perform(for editor: EditorState?, _ action: () -> Void) {
+        let previous = invocationOwner
+        invocationOwner = editor
+        defer { invocationOwner = previous }
+        if let editor { context.scenes.claimFocus(state: editor) }
+        action()
+    }
+
     static var state: EditorState? {
+        if let invocationOwner { return invocationOwner }
         if context.presentation.presentedSheet != nil,
            let owner = context.presentation.presentedSheetOwner {
             return owner
@@ -572,9 +518,9 @@ enum CommandActions {
         return context.scenes.currentEditor
     }
     static var session: EditorSession? {
-        if let owner = context.presentation.presentedSheetOwner,
+        if let owner = invocationOwner ?? context.presentation.presentedSheetOwner,
            let owningSession = context.scenes.allOpenSessions.first(where: { session in
-               session.tabs.contains { $0.state === owner }
+               session.tabs.contains { $0.owns(owner) }
            }) {
             return owningSession
         }
