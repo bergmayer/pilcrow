@@ -21,6 +21,20 @@ enum CommandActions {
         Self.context.scenes.currentSession?.newTab()
     }
 
+    /// Reuse the active Start Page; otherwise open a separate document.
+    /// Preserve the clipboard text regardless of the New Tab preference.
+    static func newFromClipboard(in session: EditorSession, pasteboard: UIPasteboard = .general) {
+        guard let text = pasteboard.string else {
+            context.presentation.openErrorMessage = "The clipboard doesn’t contain text."
+            return
+        }
+        context.presentation.presentedSheet = nil
+        let tab = session.activeTab.kind == .launcher ? session.activeTab : session.newTab(kind: .editor)
+        session.tabSwitcherActive = false
+        tab.startDocument(with: text)
+        context.scenes.claimFocus(session: session)
+    }
+
     /// Creates a blank document first, then asks for a template. Canceling
     /// leaves that blank document, regardless of the New Tab preference.
     static func newFromTemplate() {
@@ -109,6 +123,14 @@ enum CommandActions {
         guard let editor = actions, editor.selectedRange.length > 0,
               let text = editor.text(in: editor.selectedRange) else { return }
         UIPasteboard.general.string = text
+        ClipboardHistory.shared.capture()
+    }
+
+    static func selectAllAndCopy() {
+        guard let editor = actions else { return }
+        editor.focusForEditing()
+        editor.selectAll()
+        UIPasteboard.general.string = editor.text
         ClipboardHistory.shared.capture()
     }
 

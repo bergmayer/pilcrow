@@ -111,7 +111,9 @@ final class AppDelegateBridge: NSObject, UIApplicationDelegate {
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
         if let item = options.shortcutItem { apply(item) }
-        return UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        configuration.delegateClass = QuickActionSceneDelegate.self
+        return configuration
     }
 
     /// Called after iPadOS permanently discards sessions. There is no
@@ -192,5 +194,23 @@ final class AppDelegateBridge: NSObject, UIApplicationDelegate {
     private func apply(_ item: UIApplicationShortcutItem) {
         guard let action = HomeShortcut(rawValue: item.type) else { return }
         AppStateBus.shared.scenes.pendingShortcut = action
+    }
+}
+
+/// Scene-based apps receive warm-launch quick actions here, rather than
+/// through UIApplicationDelegate's legacy callback.
+@MainActor
+final class QuickActionSceneDelegate: NSObject, UIWindowSceneDelegate {
+    func windowScene(
+        _ windowScene: UIWindowScene,
+        performActionFor shortcutItem: UIApplicationShortcutItem,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        guard let action = HomeShortcut(rawValue: shortcutItem.type) else {
+            completionHandler(false)
+            return
+        }
+        AppStateBus.shared.scenes.pendingShortcut = action
+        completionHandler(true)
     }
 }

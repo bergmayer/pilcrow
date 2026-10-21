@@ -13,7 +13,7 @@ struct PreferencesView: View {
                 .tabItem { Label("Typing", systemImage: "keyboard") }
 
             ToolbarPreferencesTab()
-                .tabItem { Label("Toolbar", systemImage: "rectangle.topthird.inset.filled") }
+                .tabItem { Label(DeviceIdiom.isPhone ? EditorChrome.toolMenuTitle : "Toolbar", systemImage: "rectangle.topthird.inset.filled") }
         }
         // iPad-only minimum frame — iPhone presents as a sheet at
         // screen width, where forcing 520pt would clip.

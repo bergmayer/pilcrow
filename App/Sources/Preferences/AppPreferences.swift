@@ -84,6 +84,7 @@ enum AppPreferenceKey {
     /// JSON-encoded `[ToolbarSlot]` — symbol + command id for each
     /// item in the per-window in-app toolbar.
     static let toolbarSlots = "toolbarSlots"
+    static let quickAccessSlots = "quickAccessSlots"
     /// Whether the per-window in-app toolbar is rendered at the top of
     /// every editor scene.
     static let showToolbar  = "showToolbar"

@@ -754,6 +754,8 @@ struct EditorScene: View {
         switch shortcut {
         case .newFile:
             openWindow(id: SceneID.editor.rawValue, value: EditorRoute.newDocument())
+        case .newFromClipboard:
+            CommandActions.newFromClipboard(in: session)
         case .commandPalette:
             CommandActions.presentCommandPalette()
         }

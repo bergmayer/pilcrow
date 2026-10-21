@@ -34,6 +34,8 @@ struct ToolbarSlotEditor: View {
 
     @Environment(\.dismiss) private var dismiss
     let slotIndex: Int
+    let title: String?
+    let onSave: ((ToolbarSlot) -> Void)?
     @State private var query: String = ""
     @State private var selectedCommandId: String
     @State private var symbol: String
@@ -41,8 +43,11 @@ struct ToolbarSlotEditor: View {
 
     private let allCommands: [EditorCommandSpec] = CommandRegistry.all()
 
-    init(slotIndex: Int, initial: ToolbarSlot) {
+    init(slotIndex: Int, initial: ToolbarSlot, title: String? = nil,
+         onSave: ((ToolbarSlot) -> Void)? = nil) {
         self.slotIndex = slotIndex
+        self.title = title
+        self.onSave = onSave
         _selectedCommandId = State(initialValue: initial.commandId)
         _symbol = State(initialValue: initial.symbol)
     }
@@ -79,7 +84,7 @@ struct ToolbarSlotEditor: View {
                     }
                 }
             }
-            .navigationTitle("Toolbar Item \(slotIndex + 1)")
+            .navigationTitle(title ?? "\(DeviceIdiom.isPhone ? "Tool Menu" : "Toolbar") Item \(slotIndex + 1)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -87,11 +92,11 @@ struct ToolbarSlotEditor: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        ToolbarConfig.shared.update(
-                            slotAt: slotIndex,
-                            commandId: selectedCommandId,
-                            symbol: symbol
-                        )
+                        if let onSave {
+                            onSave(ToolbarSlot(commandId: selectedCommandId, symbol: symbol))
+                        } else {
+                            ToolbarConfig.shared.update(slotAt: slotIndex, commandId: selectedCommandId, symbol: symbol)
+                        }
                         dismiss()
                     }
                     .disabled(selectedCommandId.isEmpty || symbol.isEmpty)

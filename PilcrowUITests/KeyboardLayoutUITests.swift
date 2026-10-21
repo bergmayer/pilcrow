@@ -546,34 +546,6 @@ final class DocumentCloseUITests: XCTestCase {
         assertClosedBuffer(in: app)
     }
 
-    private func tapNativeClose(in app: XCUIApplication, withKeyboard: Bool = false) throws {
-        let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let controls = system.descendants(matching: .any).matching(
-            NSPredicate(
-                format: "identifier BEGINSWITH %@ AND label == %@", "window-controls:", "Window Controls, \(app.label)")
-        ).firstMatch
-        if !controls.exists {
-            if app.keyboards.firstMatch.exists { app.keyboards.buttons["Hide keyboard"].tap() }
-            let resize = system.otherElements.matching(
-                NSPredicate(format: "identifier == %@ AND label == %@", "resize-grabber", "Resize \(app.label)")
-            ).firstMatch
-            _ = try XCTUnwrap(
-                resize.waitForExistence(timeout: 5) ? resize : nil, "Native window resize control is unavailable")
-            resize.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.2))
-                .press(forDuration: 0.2, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.65)))
-        }
-        _ = try XCTUnwrap(
-            controls.waitForExistence(timeout: 5) ? controls : nil, "Native window controls are unavailable")
-        // Reproduce the user's path with the software keyboard visible even
-        // when the window had to be floated to expose the native close button.
-        if withKeyboard {
-            app.scrollViews["Text Editor"].tap()
-            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        }
-        if !controls.buttons["Close-button"].exists { controls.tap() }
-        controls.buttons["Close-button"].tap()
-    }
-
     private func reviewNativeWindow(in app: XCUIApplication, unsavedDocuments: Int = 2) throws {
         try tapNativeClose(in: app, withKeyboard: true)
         let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
@@ -716,9 +688,7 @@ final class DocumentCloseUITests: XCTestCase {
     }
 
     private func runCommand(_ title: String, in app: XCUIApplication) {
-        let toolbarMenu = app.buttons["Toolbar Actions"].firstMatch
-        if toolbarMenu.exists { toolbarMenu.tap() }
-        let palette = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Command Palette")).firstMatch
+        let palette = app.buttons["command-palette"].firstMatch
         XCTAssertTrue(palette.waitForExistence(timeout: 5))
         palette.tap()
         let search = app.textFields.firstMatch
@@ -743,4 +713,280 @@ final class DocumentCloseUITests: XCTestCase {
             }, evaluatedWith: nil)
         wait(for: [closed], timeout: 10)
     }
+}
+
+@MainActor
+final class PaletteEditingUITests: XCTestCase {
+    func testToolSurfaceKeepsQuickAccessAvailable() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-showToolbar", "YES"]
+        app.launch()
+        defer { app.terminate() }
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        if !phone && app.buttons["document-tab-appearance"].exists {
+            try tapNativeClose(in: app)
+            app.activate()
+        }
+        if phone {
+            let menu = app.buttons["tool-menu"]
+            XCTAssertTrue(menu.waitForExistence(timeout: 5))
+            menu.tap()
+            XCTAssertTrue(app.buttons["Find…"].waitForExistence(timeout: 5))
+            app.buttons["Command Palette…"].tap()
+        } else {
+            let palette = app.buttons["command-palette"].firstMatch
+            XCTAssertTrue(palette.waitForExistence(timeout: 5))
+            let chrome = XCTAttachment(screenshot: app.screenshot())
+            chrome.name = "ipad-toolbar-with-fixed-quick-access"
+            chrome.lifetime = .keepAlways
+            add(chrome)
+            palette.tap()
+        }
+        XCTAssertTrue(app.navigationBars["Command Palette"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+    }
+
+    func testQuickButtonsAndSoftwareCommandShortcuts() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-software-keyboard", "-showToolbar", "NO", "-newTabContent", "blank"]
+        app.launch()
+        defer { app.terminate() }
+        command("New Tab", in: app)
+        let blank = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Blank Document")).firstMatch
+        if blank.waitForExistence(timeout: 2) { blank.tap() }
+        let editor = app.scrollViews["Text Editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        typeKeys("abc", in: app)
+        XCTAssertEqual(app.buttons["quick-button-1"].label, "Undo")
+        XCTAssertEqual(app.buttons["quick-button-2"].label, "Redo")
+        for key in ["a", "x", "v"] {
+            let modifier = app.buttons["Command"].firstMatch
+            XCTAssertTrue(modifier.waitForExistence(timeout: 5))
+            modifier.tap()
+            typeKeys(key, in: app)
+            XCTAssertEqual(editor.value as? String, key == "x" ? "" : "abc")
+        }
+        app.buttons["Command"].firstMatch.tap()
+        typeKeys("p", in: app)
+        XCTAssertTrue(app.navigationBars["Command Palette"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertEqual(editor.value as? String, "abc")
+        let chrome = XCTAttachment(screenshot: app.screenshot())
+        chrome.name = "quick-buttons-and-fixed-quick-access"
+        chrome.lifetime = .keepAlways
+        add(chrome)
+
+        command("Settings…", in: app)
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        let tab = phone ? app.tabBars.buttons["Tool Menu"] : app.buttons["Toolbar"].firstMatch
+        XCTAssertTrue(tab.waitForExistence(timeout: 5))
+        tab.tap()
+        XCTAssertEqual(app.switches["Show Toolbar"].exists, !phone)
+        XCTAssertTrue(app.buttons["quick-button-setting-1"].exists)
+        XCTAssertTrue(app.buttons["quick-button-setting-2"].exists)
+        app.buttons["quick-button-setting-1"].tap()
+        let search = app.textFields["Search commands…"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("Select All and Copy")
+        let copy = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Select All and Copy")).firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        copy.tap()
+        app.buttons["Save"].tap()
+        app.buttons["quick-button-setting-2"].tap()
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("Paste")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Paste")).firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        let settings = XCTAttachment(screenshot: app.screenshot())
+        settings.name = "quick-button-settings"
+        settings.lifetime = .keepAlways
+        add(settings)
+        app.buttons["Reset Quick Access Buttons to Undo and Redo"].tap()
+        if phone {
+            app.buttons["Done"].tap()
+        } else {
+            try tapNativeClose(in: app)
+            app.activate()
+        }
+    }
+
+    func testSelectionCommandsReturnFocusAndReplaceSelectedText() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-showToolbar", "YES", "-newTabContent", "blank"]
+        app.launch()
+        defer { app.terminate() }
+        command("New Tab", in: app)
+        let blank = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Blank Document")).firstMatch
+        if blank.waitForExistence(timeout: 2) { blank.tap() }
+        let editor = app.scrollViews["Text Editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        typeKeys("hello", in: app)
+        for title in ["Select All", "Select Word", "Select Line"] {
+            command(title, in: app)
+            // No tap on the editor: that would hide the missing focus and
+            // collapse the selection we need to verify.
+            typeKeys("x", in: app)
+            XCTAssertEqual(editor.value as? String, "x", title)
+        }
+        command("Select All", in: app)
+        command("Copy", in: app)
+        command("Cut", in: app)
+        XCTAssertEqual(editor.value as? String, "")
+        command("Paste", in: app)
+        XCTAssertEqual(editor.value as? String, "x")
+        command("Undo", in: app)
+        XCTAssertEqual(editor.value as? String, "")
+        command("Redo", in: app)
+        XCTAssertEqual(editor.value as? String, "x")
+    }
+
+    func testSelectAllAfterHidingKeyboardReturnsFocus() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-showToolbar", "YES"]
+        app.launch()
+        defer { app.terminate() }
+        command("New Tab", in: app)
+        let blank = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Blank Document")).firstMatch
+        if blank.waitForExistence(timeout: 2) { blank.tap() }
+        let editor = app.scrollViews["Text Editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        typeKeys("hello", in: app)
+        hideKeyboard(in: app)
+        for title in ["Select All", "Select Word", "Select Line"] {
+            command(title, in: app)
+            let selection = XCTAttachment(screenshot: editor.screenshot())
+            selection.name = "visible-selection-" + title
+            selection.lifetime = .keepAlways
+            add(selection)
+            typeKeys("x", in: app)
+            XCTAssertEqual(editor.value as? String, "x", title)
+            hideKeyboard(in: app)
+        }
+    }
+
+    func testHomeScreenNewFromClipboardWarmAndColdLaunch() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-showToolbar", "YES"]
+        app.launch()
+        defer { app.terminate() }
+        command("New Tab", in: app)
+        let blank = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Blank Document")).firstMatch
+        if blank.waitForExistence(timeout: 2) { blank.tap() }
+        let editor = app.scrollViews["Text Editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        typeKeys("cliptext", in: app)
+        command("Copy All", in: app)
+        for cold in [false, true] {
+            if cold {
+                app.terminate()
+            } else {
+                XCUIDevice.shared.press(.home)
+            }
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            // iOS 27's Home Screen can keep animating with its menu open.
+            // Use explicit element waits instead of waiting for global idle.
+            let canSkipIdle = springboard.responds(to: NSSelectorFromString("setCurrentInteractionOptions:"))
+            if canSkipIdle {
+                // XCTest's pre-event and post-event skip flags.
+                springboard.setValue(3, forKey: "currentInteractionOptions")
+            }
+            defer {
+                if canSkipIdle { springboard.setValue(0, forKey: "currentInteractionOptions") }
+            }
+            let icon = springboard.icons["Pilcrow"].firstMatch
+            XCTAssertTrue(icon.waitForExistence(timeout: 5))
+            let ready = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: icon)
+            wait(for: [ready], timeout: 10)
+            icon.press(forDuration: 1.2)
+            let shortcut = springboard.buttons["New from Clipboard"]
+            XCTAssertTrue(shortcut.waitForExistence(timeout: 5))
+            shortcut.tap()
+            XCTAssertTrue(editor.waitForExistence(timeout: 10))
+            let seeded = expectation(for: NSPredicate(format: "value == %@", "cliptext"), evaluatedWith: editor)
+            wait(for: [seeded], timeout: 10)
+            // A keystroke goes into the seeded document immediately.
+            typeKeys("x", in: app)
+            XCTAssertEqual(editor.value as? String, "xcliptext")
+        }
+    }
+
+    private func hideKeyboard(in app: XCUIApplication) {
+        let hide = app.buttons["Hide Keyboard"].firstMatch
+        if hide.exists {
+            hide.tap()
+        } else {
+            app.buttons["Show All Tabs"].tap()
+            let done = app.buttons["Done"]
+            XCTAssertTrue(done.waitForExistence(timeout: 5))
+            done.tap()
+        }
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+    }
+
+    private func typeKeys(_ text: String, in app: XCUIApplication) {
+        if !app.keyboards.firstMatch.exists, app.buttons["Keyboard"].exists {
+            app.buttons["Keyboard"].tap()
+            let show = app.buttons["Show Keyboard"]
+            if show.waitForExistence(timeout: 2) { show.tap() }
+        }
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        for key in text {
+            let button = app.keyboards.keys[String(key)].firstMatch
+            XCTAssertTrue(button.waitForExistence(timeout: 5))
+            button.tap()
+        }
+    }
+
+    private func command(_ title: String, in app: XCUIApplication) {
+        let palette = app.buttons["command-palette"].firstMatch
+        XCTAssertTrue(palette.waitForExistence(timeout: 5))
+        palette.tap()
+        let search = app.textFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(title)
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title + ",")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        XCTAssertTrue(search.waitForNonExistence(timeout: 5))
+    }
+}
+
+private func tapNativeClose(in app: XCUIApplication, withKeyboard: Bool = false) throws {
+    let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    let controls = system.descendants(matching: .any).matching(
+        NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@", "window-controls:", "Window Controls, \(app.label)")
+    ).firstMatch
+    if !controls.exists {
+        if app.keyboards.firstMatch.exists { app.keyboards.buttons["Hide keyboard"].tap() }
+        let resize = system.otherElements.matching(
+            NSPredicate(format: "identifier == %@ AND label == %@", "resize-grabber", "Resize \(app.label)")
+        ).firstMatch
+        _ = try XCTUnwrap(
+            resize.waitForExistence(timeout: 5) ? resize : nil, "Native window resize control is unavailable")
+        resize.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.2))
+            .press(forDuration: 0.2, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.65)))
+    }
+    _ = try XCTUnwrap(
+        controls.waitForExistence(timeout: 5) ? controls : nil, "Native window controls are unavailable")
+    // Reproduce the user's path with the software keyboard visible even
+    // when the window had to be floated to expose the native close button.
+    if withKeyboard {
+        app.scrollViews["Text Editor"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+    }
+    if !controls.buttons["Close-button"].exists { controls.tap() }
+    controls.buttons["Close-button"].tap()
 }

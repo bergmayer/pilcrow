@@ -218,7 +218,7 @@
 	</dict>
 
 	<!-- Home Screen Quick Actions: long-press the app icon to get straight
-	     to New File / Command Palette
+	     to New File / New from Clipboard / Command Palette
 	     without going through the editor first. The handler in the SwiftUI
 	     scene observes the matching `UIApplicationShortcutItem.type` and
 	     fires the corresponding command. -->
@@ -234,11 +234,19 @@
 		</dict>
 		<dict>
 			<key>UIApplicationShortcutItemType</key>
+			<string>com.palefire.pilcrow.shortcut.newFromClipboard</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>New from Clipboard</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>doc.on.clipboard</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
 			<string>com.palefire.pilcrow.shortcut.commandPalette</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Command Palette</string>
-			<key>UIApplicationShortcutItemIconType</key>
-			<string>UIApplicationShortcutIconTypeSearch</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>terminal</string>
 		</dict>
 	</array>
 </dict>

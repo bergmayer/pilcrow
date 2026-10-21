@@ -54,7 +54,7 @@ struct EditorCommandSpec: Identifiable {
         synonyms: [String] = [],
         description: String? = nil,
         action: @escaping @MainActor () -> Void,
-        isEnabled: @escaping @MainActor () -> Bool = { AppStateBus.shared.scenes.currentEditor != nil }
+        isEnabled: @escaping @MainActor () -> Bool = { CommandActions.state != nil }
     ) {
         self.id = id
         self.title = title
@@ -144,7 +144,7 @@ enum CommandRegistry {
             .init(id: "revert",     title: "Revert to Saved",                category: .file, synonyms: ["reload from disk", "discard changes"], action: CommandActions.revertToSaved),
             .init(id: "revs",       title: "Show Revisions…",                category: .file, shortcutHint: "⌥⌘H",  synonyms: ["history", "versions", "time machine", "undo to disk"], action: CommandActions.presentRevisions),
             .init(id: "prefs",      title: "Settings…",                      category: .app,  shortcutHint: "⌘,",   synonyms: ["preferences", "options", "config", "settings", "edit transforms"], action: CommandActions.presentPreferences,    isEnabled: { true }),
-            .init(id: "palette",    title: "Command Palette…",               category: .app,  shortcutHint: "⌘P",   synonyms: ["all commands", "fuzzy commands"],  action: CommandActions.presentCommandPalette, isEnabled: { true })
+            .init(id: "palette",    title: "Command Palette…",               category: .app,  shortcutHint: "⌘P",   synonyms: ["command palette", "all commands", "fuzzy commands"],  action: CommandActions.presentCommandPalette, isEnabled: { true })
         ]
 
         // MARK: Search
@@ -178,6 +178,9 @@ enum CommandRegistry {
             .init(id: "copy", title: "Copy", category: .edit, shortcutHint: "⌘C", action: CommandActions.copySelection,
                   isEnabled: { (CommandActions.actions?.selectedRange.length ?? 0) > 0 }),
             .init(id: "paste", title: "Paste", category: .edit, shortcutHint: "⌘V", action: CommandActions.paste),
+            .init(id: "selectAllCopy", title: "Select All and Copy", category: .edit,
+                  synonyms: ["copy everything", "select and copy", "copy whole document"],
+                  action: CommandActions.selectAllAndCopy, isEnabled: { CommandActions.actions != nil }),
             .init(id: "selectAll", title: "Select All", category: .selection, shortcutHint: "⌘A", action: { CommandActions.actions?.selectAll() })
         ]
 
@@ -595,6 +598,7 @@ enum CommandRegistry {
             commands.append(.init(id: "bkJump.\(slot)",  title: "Jump to Bookmark \(slot)", category: .bookmark, shortcutHint: "⌃\(slot)", action: { CommandActions.jumpToBookmark(slot) }))
         }
 
+        if DeviceIdiom.isPhone { commands.removeAll { $0.id == "toggleTB" } }
         return commands
     }
 }

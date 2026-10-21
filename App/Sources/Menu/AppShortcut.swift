@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Single source of truth for menu keyboard shortcuts. Keys are
 /// named after the action, not the chord — a future remap touches
@@ -91,4 +92,33 @@ enum AppShortcut {
     static let reopenLastClosed  = KeyboardShortcut("t", modifiers: [.command, .shift])
     static let nextTab           = KeyboardShortcut("]", modifiers: [.command, .shift])
     static let previousTab       = KeyboardShortcut("[", modifiers: [.command, .shift])
+}
+
+/// Registry shortcut hints use the same modifier glyphs as the menus.
+/// Normalize them once when interpreting a software-keyboard chord.
+struct EditorKeyChord: Equatable {
+    let key: String
+    let modifiers: UIKeyModifierFlags
+
+    init(key: String, modifiers: UIKeyModifierFlags) {
+        self.key = key.lowercased()
+        self.modifiers = modifiers
+    }
+
+    init?(hint: String) {
+        var key = ""
+        var modifiers: UIKeyModifierFlags = []
+        for character in hint {
+            switch character {
+            case "⌘": modifiers.insert(.command)
+            case "⌃": modifiers.insert(.control)
+            case "⌥": modifiers.insert(.alternate)
+            case "⇧": modifiers.insert(.shift)
+            case " ": continue
+            default: key.append(character)
+            }
+        }
+        guard key.count == 1 else { return nil }
+        self.init(key: key, modifiers: modifiers)
+    }
 }

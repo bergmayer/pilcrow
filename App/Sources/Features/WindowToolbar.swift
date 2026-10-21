@@ -55,8 +55,8 @@ struct WindowToolbar: View {
             let stoplightInset: CGFloat = 70
             // Mirror inset for the centered pill: 2× this keeps the
             // pill symmetric around the midpoint without crashing
-            // into the undo + palette cluster.
-            let trailingZone = Self.touchTarget * 2 + Self.buttonSpacing + Self.outerPadding
+            // into Quick Access.
+            let trailingZone = Self.touchTarget * CGFloat(config.quickSlots.compactMap { $0 }.count + 1) + Self.buttonSpacing * 2 + Self.outerPadding
             // 600 = iPhone Plus landscape. Below that the centered
             // pill would overlap the title (it claims 60% of width
             // and the title's flex zone goes negative), so collapse
@@ -192,20 +192,16 @@ struct WindowToolbar: View {
         }
     }
 
-    /// Undo and Command Palette stay available beside the custom tools.
+    /// Quick Access contains Command Palette and two configurable buttons.
     /// New Tab and Tab Overview live together in the persistent tab strip.
     @ViewBuilder
     private var trailingControls: some View {
         HStack(spacing: Self.buttonSpacing) {
-            bareButton(symbol: "arrow.uturn.backward", help: "Undo") {
-                CommandActions.undo()
-            }
-            bareButton(symbol: "arrow.uturn.forward", help: "Redo") {
-                CommandActions.redo()
-            }
-            bareButton(symbol: "command.square", help: "Command Palette") {
+            QuickToolbarButtons(onInteraction: { onInteraction?() })
+            bareButton(symbol: EditorChrome.commandPaletteSymbol, help: EditorChrome.commandPaletteTitle) {
                 CommandActions.presentCommandPalette()
             }
+            .accessibilityIdentifier("command-palette")
         }
     }
 

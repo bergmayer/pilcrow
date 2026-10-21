@@ -666,17 +666,27 @@ final class TextInputView: UIView, UITextInput {
             delegate?.textInputViewWillBeginEditing(self)
         }
         let didBecomeFirstResponder = super.becomeFirstResponder()
-        if didBecomeFirstResponder {
+        if didBecomeFirstResponder || isFirstResponder {
             delegate?.textInputViewDidBeginEditing(self)
+            refreshSelectionDisplay()
         } else {
-            // This is called in the case where:
-            // 1. The view is the first responder.
-            // 2. A view is presented modally on top of the editor.
-            // 3. The modally presented view is dismissed.
-            // 4. The responder chain attempts to make the text view first responder again but super.becomeFirstResponder() returns false.
+            // A failed focus request must not disable selection display
+            // when UIKit has already restored us as first responder.
             delegate?.textInputViewDidCancelBeginEditing(self)
         }
-        return didBecomeFirstResponder
+        return didBecomeFirstResponder || isFirstResponder
+    }
+
+    /// UITextInteraction can leave its display inactive after focus moves
+    /// through a sheet. Programmatic selections must activate the existing
+    /// public display interaction, just as a touch selection does.
+    func refreshSelectionDisplay() {
+        guard isFirstResponder else { return }
+        for display in interactions.compactMap({ $0 as? UITextSelectionDisplayInteraction }) {
+            display.isActivated = true
+            display.setNeedsSelectionUpdate()
+            display.layoutManagedSubviews()
+        }
     }
 
     override func resignFirstResponder() -> Bool {
@@ -707,6 +717,13 @@ final class TextInputView: UIView, UITextInput {
         if notifyDelegateAboutSelectionChangeInLayoutSubviews {
             notifyDelegateAboutSelectionChangeInLayoutSubviews = false
             delegate?.textInputViewDidChangeSelection(self)
+        }
+        // UIKit may install a new display interaction after the focus
+        // callback. Activate it on layout too, before the selected text is
+        // drawn, rather than leaving it inactive until the next gesture.
+        if isFirstResponder, (selectedRange?.length ?? 0) > 0,
+           interactions.compactMap({ $0 as? UITextSelectionDisplayInteraction }).contains(where: { !$0.isActivated }) {
+            refreshSelectionDisplay()
         }
     }
 

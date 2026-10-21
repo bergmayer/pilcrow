@@ -174,9 +174,23 @@ struct EditorView: View {
             if DeviceIdiom.isPhone {
                 PhoneEditorToolbar(
                     documentTitle: documentTitle,
-                    showToolbarPref: prefs.showToolbar,
                     claimFocus: claimFocus
                 )
+            } else if !prefs.showToolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 2) {
+                        QuickToolbarButtons(onInteraction: claimFocus)
+                        Button {
+                            claimFocus()
+                            CommandActions.presentCommandPalette()
+                        } label: {
+                            Image(systemName: EditorChrome.commandPaletteSymbol)
+                            .font(.system(size: 16, weight: .regular))
+                        }
+                        .accessibilityLabel(EditorChrome.commandPaletteTitle)
+                        .accessibilityIdentifier("command-palette")
+                    }
+                }
             }
         }
     }
@@ -587,7 +601,12 @@ struct EditorView: View {
                 let owner = selectedPane
                 commandAfterDismiss = {
                     CommandActions.perform(for: owner) {
-                        if command.isEnabled() { command.action() }
+                        guard command.isEnabled() else { return }
+                        // The palette's search field took first responder.
+                        // Restore the captured pane before changing selection
+                        // so UIKit displays it and subsequent typing edits it.
+                        CommandActions.actions?.focusForEditing()
+                        command.action()
                     }
                 }
             }

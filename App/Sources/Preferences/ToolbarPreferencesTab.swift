@@ -6,18 +6,53 @@ struct ToolbarPreferencesTab: View {
     @State private var config = ToolbarConfig.shared
     @State private var addingSlot: Bool = false
     @State private var editingIndex: Int?
+    @State private var editingQuickIndex: Int?
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Show toolbar at top of every window", isOn: $prefs.showToolbar)
-            } footer: {
-                Text("Tap an item to edit its icon or assigned command. Drag the handle to reorder.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            if !DeviceIdiom.isPhone {
+                Section {
+                    Toggle("Show Toolbar", isOn: $prefs.showToolbar)
+                }
             }
 
-            Section("Items") {
+            Section {
+                ForEach(Array(config.quickSlots.enumerated()), id: \.offset) { index, slot in
+                    Button {
+                        editingQuickIndex = index
+                    } label: {
+                        HStack(spacing: 12) {
+                            toolbarSymbol(slot?.symbol ?? "plus.square.dashed", size: 20)
+                                .frame(width: 36, height: 36)
+                            Text("Button \(index + 1): \(slot.map { commandTitle(for: $0.commandId) } ?? "None")")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                        }
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("quick-button-setting-\(index + 1)")
+                }
+                .onDelete { offsets in
+                    for index in offsets { config.setQuickSlot(nil, at: index) }
+                }
+                Label(EditorChrome.commandPaletteTitle, systemImage: EditorChrome.commandPaletteSymbol)
+                    .accessibilityLabel("Command Palette, always available")
+                if DeviceIdiom.isPhone {
+                    Label(EditorChrome.toolMenuTitle, systemImage: "ellipsis.rectangle")
+                        .accessibilityLabel("Tool Menu, always available")
+                }
+                Button("Reset Quick Access Buttons to Undo and Redo") { config.resetQuickButtons() }
+            } header: {
+                Text("Quick Access")
+            } footer: {
+                Text(DeviceIdiom.isPhone
+                     ? "Command Palette and Tool Menu are always available in Quick Access. Choose up to two other buttons; Undo and Redo are the defaults."
+                     : "Command Palette is always available in Quick Access. Choose up to two other buttons; Undo and Redo are the defaults.")
+            }
+
+            Section(EditorChrome.toolItemsTitle) {
                 ForEach(Array(config.slots.enumerated()), id: \.element.id) { index, slot in
                     Button {
                         editingIndex = index
@@ -66,6 +101,15 @@ struct ToolbarPreferencesTab: View {
         .environment(\.editMode, .constant(.active))
         .sheet(isPresented: $addingSlot) {
             ToolbarSlotAdder()
+        }
+        .sheet(item: Binding<EditingSlotID?>(
+            get: { editingQuickIndex.map(EditingSlotID.init) },
+            set: { editingQuickIndex = $0?.value }
+        )) { wrapper in
+            ToolbarSlotEditor(slotIndex: wrapper.value,
+                initial: config.quickSlots[wrapper.value] ?? ToolbarSlot(commandId: "undo", symbol: "arrow.uturn.backward"),
+                title: "Quick Access Button \(wrapper.value + 1)",
+                onSave: { config.setQuickSlot($0, at: wrapper.value) })
         }
         .sheet(item: Binding<EditingSlotID?>(
             get: { editingIndex.map(EditingSlotID.init) },
@@ -128,7 +172,7 @@ private struct ToolbarSlotAdder: View {
                     }
                 }
             }
-            .navigationTitle("Add Toolbar Item")
+            .navigationTitle(DeviceIdiom.isPhone ? "Add Tool Menu Item" : "Add Toolbar Item")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

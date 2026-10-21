@@ -69,7 +69,7 @@ struct EditorCommands: Commands {
             }
             CommandGroup(after: .appInfo) {
                 Button(action: { presentSheet(.commandPalette) }) {
-                    Label("Command Palette…", systemImage: "command")
+                    Label(EditorChrome.commandPaletteTitle + "…", systemImage: EditorChrome.commandPaletteSymbol)
                 }
                 .keyboardShortcut(AppShortcut.commandPalette)
                 // ⌃P alias is wired in-window via PaletteShortcutAlias
@@ -567,10 +567,12 @@ struct EditorCommands: Commands {
             Label("Show Status Bar", systemImage: "rectangle.bottomthird.inset.filled")
         }
         .disabled(!isEnabled)
-        Toggle(isOn: bindingFor(\.showToolbar, defaultsKey: AppPreferenceKey.showToolbar)) {
-            Label("Show Toolbar", systemImage: "rectangle.topthird.inset.filled")
+        if !DeviceIdiom.isPhone {
+            Toggle(isOn: bindingFor(\.showToolbar, defaultsKey: AppPreferenceKey.showToolbar)) {
+                Label("Show Toolbar", systemImage: "rectangle.topthird.inset.filled")
+            }
+            .disabled(!isEnabled)
         }
-        .disabled(!isEnabled)
         Toggle(isOn: bindingFor(\.liveMatchHighlight, defaultsKey: AppPreferenceKey.liveMatchHighlight)) {
             Label("Highlight All Occurrences of Selection", systemImage: "highlighter")
         }

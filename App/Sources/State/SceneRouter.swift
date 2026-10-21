@@ -130,6 +130,7 @@ enum SceneID: String {
 /// `rawValue` must match the `UIApplicationShortcutItemType` strings
 /// declared in Info.plist under `UIApplicationShortcutItems`.
 enum HomeShortcut: String {
+    case newFromClipboard = "com.palefire.pilcrow.shortcut.newFromClipboard"
     case newFile        = "com.palefire.pilcrow.shortcut.newFile"
     case commandPalette = "com.palefire.pilcrow.shortcut.commandPalette"
 }

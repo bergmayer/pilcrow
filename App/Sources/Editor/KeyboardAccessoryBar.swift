@@ -16,7 +16,11 @@ enum KeyboardAccessoryBar {
     }
 
     private static func refresh(_ textView: EditorEngine.TextView) {
+        #if DEBUG
+        let hasHardwareKeyboard = GCKeyboard.coalesced != nil && !ProcessInfo.processInfo.arguments.contains("--ui-test-software-keyboard")
+        #else
         let hasHardwareKeyboard = GCKeyboard.coalesced != nil
+        #endif
         let assistant = textView.inputAssistantItem
 
         if hasHardwareKeyboard {
@@ -97,10 +101,6 @@ private final class IPadAccessoryObserver {
     init(host: EditorEngine.TextView) {
         self.host = host
 
-        let escape = Self.barItem(symbol: "escape", accessibility: "Escape") { [weak host] _ in
-            Self.handleEscape(host: host)
-        }
-
         let control = Self.barItem(symbol: "control", accessibility: "Control") { [weak host] _ in
             Self.toggleModifier(\.armedAccessoryControl, host: host)
         }
@@ -126,7 +126,7 @@ private final class IPadAccessoryObserver {
 
         // iPad keyboard ships its own dismiss key (bottom-right);
         // no chevron-down needed here.
-        self.leadingItems = [escape, lineStart, lineEnd, docStart, docEnd]
+        self.leadingItems = [lineStart, lineEnd, docStart, docEnd]
         let spaceWidth: CGFloat = 18
         let s1 = UIBarButtonItem(systemItem: .fixedSpace); s1.width = spaceWidth
         let s2 = UIBarButtonItem(systemItem: .fixedSpace); s2.width = spaceWidth
@@ -174,34 +174,10 @@ private final class IPadAccessoryObserver {
         host: EditorEngine.TextView?
     ) {
         guard let state = host?.editorState else { return }
-        let arming = !state[keyPath: keyPath]
-        let others: [ReferenceWritableKeyPath<EditorState, Bool>] = [
-            \.armedAccessoryControl,
-            \.armedAccessoryOption,
-            \.armedAccessoryCommand,
-        ]
-        for path in others where path != keyPath { state[keyPath: path] = false }
-        state[keyPath: keyPath] = arming
+        state[keyPath: keyPath].toggle()
     }
 
-    private static func handleEscape(host: EditorEngine.TextView?) {
-        guard let host else { return }
-        if let state = host.editorState,
-           state.armedAccessoryControl || state.armedAccessoryCommand || state.armedAccessoryOption {
-            state.armedAccessoryControl = false
-            state.armedAccessoryCommand = false
-            state.armedAccessoryOption = false
-            return
-        }
-        let bus = AppStateBus.shared
-        if bus.presentation.presentedSheet != nil {
-            bus.presentation.presentedSheet = nil
-            return
-        }
-        if host.selectedRange.length > 0 {
-            host.selectedRange = NSRange(location: host.selectedRange.location, length: 0)
-        }
-    }
+
 }
 
 private final class KeyboardObserverHolder: @unchecked Sendable {
@@ -349,107 +325,54 @@ enum CaretMover {
 @MainActor
 enum AccessoryKeyboard {
 
-    /// Called from `shouldChangeTextIn` when a sticky modifier is
-    /// armed. Returns `true` when the action consumed the keypress.
-    /// Priority ⌘ → ⌃ → ⌥; shifted ⌘ shortcuts (⌘⇧S) detected via
-    /// the uppercase letter the keyboard delivers.
+    /// Sticky modifiers are consumed before dispatch, since actions such as
+    /// Paste can re-enter the text-input delegate.
     static func handleArmedKey(_ text: String, state: EditorState) -> Bool {
-        guard state.textView != nil else { return false }
-        let lower = text.lowercased()
-        let engine = state.textView
-        let shifted = (text != lower)
-
-        let command = state.armedAccessoryCommand
-        let control = state.armedAccessoryControl
-        let option = state.armedAccessoryOption
-        // Disarm BEFORE dispatching — armed actions call `replace`,
-        // which re-enters `shouldChangeTextIn`; a still-armed flag on
-        // a single-char insert (e.g. pasting a clipboard containing
-        // "v" with ⌘ armed) recurses forever.
+        guard let engine = state.textView else { return false }
+        var modifiers: UIKeyModifierFlags = []
+        if state.armedAccessoryCommand { modifiers.insert(.command) }
+        if state.armedAccessoryControl { modifiers.insert(.control) }
+        if state.armedAccessoryOption { modifiers.insert(.alternate) }
+        guard !modifiers.isEmpty else { return false }
         state.armedAccessoryCommand = false
         state.armedAccessoryControl = false
         state.armedAccessoryOption = false
 
-        if command {
-            return handleCommandKey(lower, shifted: shifted, engine: engine)
-        }
-        if control {
-            return handleControlKey(lower, engine: engine)
-        }
-        if option {
-            return handleOptionKey(lower, engine: engine)
-        }
-        return false
-    }
-
-    private static func handleCommandKey(
-        _ lower: String,
-        shifted: Bool,
-        engine: PilcrowTextView?
-    ) -> Bool {
-        if handleDocumentCommand(lower, shifted: shifted) {
-            return true
-        }
-        if handleEditingCommand(lower, shifted: shifted, engine: engine) {
-            return true
-        }
-        return handleFindCommand(lower, shifted: shifted)
-    }
-
-    private static func handleDocumentCommand(_ lower: String, shifted: Bool) -> Bool {
-        switch lower {
-        case "s":
-            if shifted {
-                AppStateBus.shared.pickers.pending = .saveAs
-            } else {
-                CommandActions.saveFile()
+        if text != text.lowercased() { modifiers.insert(.shift) }
+        let chord = EditorKeyChord(key: text, modifiers: modifiers)
+        CommandActions.perform(for: state) {
+            if let command = command(for: chord) {
+                if command.isEnabled() { command.action() }
+            } else if (modifiers == .command && text == ";") || (modifiers == .control && text.lowercased() == "p") {
+                CommandActions.presentCommandPalette()
+            } else if modifiers == .control {
+                _ = handleControlKey(text.lowercased(), engine: engine)
+            } else if modifiers == .alternate {
+                _ = handleOptionKey(text.lowercased(), engine: engine)
             }
-            return true
-        case "t": shifted ? CommandActions.reopenLastClosedTab() : CommandActions.newTab()
-        case "n": CommandActions.newWindow()
-        case "w": CommandActions.closeActiveTab()
-        default: return false
         }
+        // An unassigned or disabled shortcut must not insert its letter.
         return true
     }
 
-    private static func handleEditingCommand(
-        _ lower: String,
-        shifted: Bool,
-        engine: PilcrowTextView?
-    ) -> Bool {
-        switch lower {
-        case "z": shifted ? CommandActions.redo() : CommandActions.undo()
-        case "c":
-            copySelection(from: engine)
-        case "x":
-            copySelection(from: engine, clear: true)
-        case "v":
-            pasteAtSelection(into: engine)
-        case "a":
-            engine?.selectAll()
-        case "[": CommandActions.outdentSelection()
-        case "]": CommandActions.indentSelection()
-        default: return false
-        }
-        return true
-    }
-
-    private static func handleFindCommand(_ lower: String, shifted: Bool) -> Bool {
-        switch lower {
-        case "f":
-            if shifted {
-                CommandActions.presentMultiFileSearch()
-            } else {
-                CommandActions.seedFindFromSelection()
-                CommandActions.presentSheet(.findReplace)
+    static func command(for chord: EditorKeyChord) -> EditorCommandSpec? {
+        func match(_ chord: EditorKeyChord) -> EditorCommandSpec? {
+            CommandRegistry.all().first { command in
+                command.shortcutHint.flatMap(EditorKeyChord.init(hint:)) == chord
             }
-        case "g": shifted ? CommandActions.findPrevious() : CommandActions.findNext()
-        case "l": CommandActions.presentSheet(.goToLine)
-        case ";": CommandActions.presentCommandPalette()
-        default: return false
         }
-        return true
+        if let command = match(chord) { return command }
+        let shiftedPunctuation = ["\"": "'", "_": "-", "{": "[", "}": "]", "|": "\\", "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0"]
+        if let base = shiftedPunctuation[chord.key],
+           let command = match(EditorKeyChord(key: base, modifiers: chord.modifiers.union(.shift))) {
+            return command
+        }
+        // Auto-capitalization can uppercase the soft key without changing
+        // the intended shortcut. Prefer an explicit Shift binding first.
+        if chord.modifiers.contains(.shift) {
+            return match(EditorKeyChord(key: chord.key, modifiers: chord.modifiers.subtracting(.shift)))
+        }
+        return nil
     }
 
     private static func handleControlKey(_ lower: String, engine: PilcrowTextView?) -> Bool {
@@ -502,21 +425,6 @@ enum AccessoryKeyboard {
         default:
             return false
         }
-    }
-
-    private static func copySelection(from textView: EditorEngine.TextView?, clear: Bool = false) {
-        guard let textView, textView.selectedRange.length > 0 else { return }
-        let nsText = textView.text as NSString
-        let str = nsText.substring(with: textView.selectedRange)
-        UIPasteboard.general.string = str
-        if clear {
-            textView.replace(textView.selectedRange, withText: "")
-        }
-    }
-
-    private static func pasteAtSelection(into textView: EditorEngine.TextView?) {
-        guard let textView, let clip = UIPasteboard.general.string else { return }
-        textView.replace(textView.selectedRange, withText: clip)
     }
 }
 
@@ -591,15 +499,9 @@ final class EditorAccessoryView: UIInputView {
     private func makeButtons() -> [AccessoryButton] {
         var buttons: [AccessoryButton] = []
 
-        // Escape leads — clears armed modifiers / dismisses sheet /
-        // collapses selection.
-        buttons.append(button(symbol: "escape", label: "Escape") { [weak self] in
-            self?.handleEscape()
-        })
-
         // Sticky modifier cluster (⌃ ⌥ ⌘): tap arms; consumed by the
-        // next key on the iOS keyboard. Tapping a different modifier
-        // disarms the others. Shift isn't a button — the iOS
+        // next key on the iOS keyboard. Modifiers can be combined.
+        // Shift isn't a button — the iOS
         // keyboard's own shift handles capitalization and the
         // engine reads the resulting case to detect ⌘⇧ shortcuts.
         // IMPORTANT: hold each button in a local `let` before writing
@@ -646,8 +548,7 @@ final class EditorAccessoryView: UIInputView {
         return buttons
     }
 
-    /// Sticky-modifier factory. Only one modifier is in flight at
-    /// a time; tapping a different one disarms the rest.
+    /// Modifiers can be combined, then clear after the next key.
     private func modifierButton(
         symbol: String,
         label: String,
@@ -655,40 +556,8 @@ final class EditorAccessoryView: UIInputView {
     ) -> AccessoryButton {
         button(symbol: symbol, label: label) { [weak self] in
             guard let self, let state = self.host?.editorState else { return }
-            let armingThis = !state[keyPath: keyPath]
-            let allOthers: [ReferenceWritableKeyPath<EditorState, Bool>] = [
-                \.armedAccessoryControl,
-                \.armedAccessoryCommand,
-                \.armedAccessoryOption,
-            ]
-            for path in allOthers where path != keyPath {
-                state[keyPath: path] = false
-            }
-            state[keyPath: keyPath] = armingThis
+            state[keyPath: keyPath].toggle()
             self.refreshModifierVisuals()
-        }
-    }
-
-    private func handleEscape() {
-        // Order: clear armed modifiers → dismiss sheet → clear
-        // selection. Each step short-circuits if it had work to do.
-        if let state = host?.editorState,
-           state.armedAccessoryControl
-            || state.armedAccessoryCommand
-            || state.armedAccessoryOption {
-            state.armedAccessoryControl = false
-            state.armedAccessoryCommand = false
-            state.armedAccessoryOption = false
-            refreshModifierVisuals()
-            return
-        }
-        let bus = AppStateBus.shared
-        if bus.presentation.presentedSheet != nil {
-            bus.presentation.presentedSheet = nil
-            return
-        }
-        if let host, host.selectedRange.length > 0 {
-            host.selectedRange = NSRange(location: host.selectedRange.location, length: 0)
         }
     }
 
@@ -734,6 +603,7 @@ private final class AccessoryRow: UIView {
         super.init(frame: .zero)
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.showsHorizontalScrollIndicator = false
+        scroll.contentInsetAdjustmentBehavior = .never
         scroll.alwaysBounceHorizontal = true
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.axis = .horizontal
@@ -757,6 +627,16 @@ private final class AccessoryRow: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scroll.layoutIfNeeded()
+        let horizontalInset = max(0, (scroll.bounds.width - stack.bounds.width) / 2)
+        if scroll.contentInset.left != horizontalInset {
+            scroll.contentInset = UIEdgeInsets(top: 0, left: horizontalInset, bottom: 0, right: horizontalInset)
+            scroll.contentOffset = CGPoint(x: -horizontalInset, y: 0)
+        }
+    }
 
     func setButtons(_ buttons: [AccessoryButton]) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }

@@ -228,7 +228,13 @@ open class TextView: UIScrollView {
             }
         }
         set {
-            textInputView.selectedTextRange = IndexedRange(newValue)
+            // App commands change selection programmatically. Notify UIKit
+            // around the change so its highlight and handles update without
+            // waiting for a touch in the editor.
+            textInputView.inputDelegate?.selectionWillChange(textInputView)
+            textInputView.selectedRange = newValue.nonNegativeLength
+            textInputView.inputDelegate?.selectionDidChange(textInputView)
+            textInputView.refreshSelectionDisplay()
         }
     }
     /// The current selection range of the text view as a UITextRange.
@@ -237,7 +243,10 @@ open class TextView: UIScrollView {
             textInputView.selectedTextRange
         }
         set {
-            textInputView.selectedTextRange = newValue
+            textInputView.inputDelegate?.selectionWillChange(textInputView)
+            textInputView.selectedRange = (newValue as? IndexedRange)?.range.nonNegativeLength
+            textInputView.inputDelegate?.selectionDidChange(textInputView)
+            textInputView.refreshSelectionDisplay()
         }
     }
     /// The custom input accessory view to display when the receiver becomes the first responder.
@@ -732,19 +741,22 @@ open class TextView: UIScrollView {
     /// Asks UIKit to make this object the first responder in its window.
     @discardableResult
     override open func becomeFirstResponder() -> Bool {
-        if !isEditing && delegateAllowsEditingToBegin {
-            _ = textInputView.resignFirstResponder()
-            _ = textInputView.becomeFirstResponder()
+        if textInputView.isFirstResponder {
+            if !isEditing {
+                textInputViewWillBeginEditing(textInputView)
+                textInputViewDidBeginEditing(textInputView)
+            }
+            textInputView.refreshSelectionDisplay()
             return true
-        } else {
-            return false
         }
+        guard delegateAllowsEditingToBegin else { return false }
+        return textInputView.becomeFirstResponder()
     }
 
     /// Notifies this object that it has been asked to relinquish its status as first responder in its window.
     @discardableResult
     override open func resignFirstResponder() -> Bool {
-        if isEditing && shouldEndEditing {
+        if textInputView.isFirstResponder && shouldEndEditing {
             return textInputView.resignFirstResponder()
         } else {
             return false

@@ -31,6 +31,281 @@ final class BasicEditingTests: XCTestCase {
         try await super.tearDown()
     }
 
+    func testSoftCommandShortcutsUseRegisteredActionsWithoutTypingLetters() {
+        let h = Harness("hello")
+        h.tab.state.armedAccessoryCommand = true
+        h.editor.insertText("a")
+        XCTAssertEqual(h.editor.text, "hello")
+        XCTAssertEqual(h.editor.selectedRange, NSRange(location: 0, length: 5))
+        XCTAssertFalse(h.tab.state.armedAccessoryCommand)
+        h.tab.state.armedAccessoryCommand = true
+        h.editor.insertText("b")
+        XCTAssertEqual(h.editor.text, "**hello**")
+        h.tab.state.armedAccessoryCommand = true
+        h.editor.insertText("p")
+        XCTAssertEqual(h.context.presentation.presentedSheet?.id, EditorSheet.commandPalette.id)
+        XCTAssertEqual(h.editor.text, "**hello**")
+        h.context.presentation.presentedSheet = nil
+        h.tab.state.armedAccessoryCommand = true
+        h.editor.insertText("q")
+        XCTAssertEqual(h.editor.text, "**hello**", "Unassigned Command keys must not insert their letters")
+    }
+
+    func testSoftModifiersCombineAndDisarmBeforePaste() {
+        let h = Harness("hello")
+        h.editor.setSelection(NSRange(location: 0, length: 5))
+        h.tab.state.armedAccessoryCommand = true
+        h.tab.state.armedAccessoryOption = true
+        h.editor.insertText("c")
+        XCTAssertEqual(h.editor.text, "`hello`")
+        XCTAssertFalse(h.tab.state.armedAccessoryCommand)
+        XCTAssertFalse(h.tab.state.armedAccessoryOption)
+        h.editor.selectAll()
+        UIPasteboard.general.string = "v"
+        h.tab.state.armedAccessoryCommand = true
+        h.editor.insertText("v")
+        XCTAssertEqual(h.editor.text, "v", "Pasting a single shortcut letter must not recurse")
+        XCTAssertFalse(h.tab.state.armedAccessoryCommand)
+    }
+
+    func testSoftKeyboardShortcutChordsMatchMenuBindings() {
+        let cases: [(String, UIKeyModifierFlags, String)] = [
+            ("p", .command, "palette"), ("a", .command, "selectAll"),
+            ("v", .command, "paste"), ("b", .command, "mdBold"),
+            ("z", [.command, .shift], "redo"),
+            ("c", [.command, .alternate], "mdCode"),
+            ("2", [.command, .control], "mdH2"),
+            ("_", .command, "mdRule")
+        ]
+        for (key, modifiers, id) in cases {
+            XCTAssertEqual(AccessoryKeyboard.command(for: EditorKeyChord(key: key, modifiers: modifiers))?.id, id)
+        }
+        for spec in CommandRegistry.all() {
+            guard spec.id != "openInWin" || !DeviceIdiom.isPhone,
+                  let hint = spec.shortcutHint, let chord = EditorKeyChord(hint: hint),
+                  chord.key.unicodeScalars.allSatisfy(\.isASCII) else { continue }
+            XCTAssertEqual(AccessoryKeyboard.command(for: chord)?.id, spec.id, hint)
+        }
+    }
+
+    func testQuickButtonsDefaultToUndoRedoAndPersistIndependentlyOfTools() throws {
+        let name = "PilcrowQuickButtons-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let config = ToolbarConfig(defaults: defaults)
+        XCTAssertEqual(config.quickSlots.compactMap { $0?.commandId }, ["undo", "redo"])
+        config.setSlots([ToolbarSlot(commandId: "paste", symbol: "doc.on.clipboard")])
+        config.setQuickSlot(ToolbarSlot(commandId: "selectAllCopy", symbol: "doc.on.doc"), at: 0)
+        config.setQuickSlot(ToolbarSlot(commandId: "paste", symbol: "doc.on.clipboard"), at: 1)
+        let restored = ToolbarConfig(defaults: defaults)
+        XCTAssertEqual(restored.quickSlots.compactMap { $0?.commandId }, ["selectAllCopy", "paste"])
+        XCTAssertEqual(restored.slots.map(\.commandId), ["paste"])
+        restored.setQuickSlot(nil, at: 1)
+        XCTAssertEqual(ToolbarConfig(defaults: defaults).quickSlots.count, 2)
+        XCTAssertNil(ToolbarConfig(defaults: defaults).quickSlots[1])
+        restored.resetQuickButtons()
+        XCTAssertEqual(restored.quickSlots, ToolbarConfig.quickDefaults)
+        XCTAssertEqual(restored.slots.map(\.commandId), ["paste"])
+    }
+
+    func testSelectAllAndCopyUsesTheLiveBufferAndSelectsIt() throws {
+        let source = "hello 😀  \r\n"
+        let h = Harness(source)
+        h.editor.setSelection(NSRange(location: 1, length: 0))
+        try XCTUnwrap(CommandRegistry.lookup(id: "selectAllCopy")).action()
+        XCTAssertEqual(UIPasteboard.general.string, source)
+        XCTAssertEqual(h.editor.selectedRange, NSRange(location: 0, length: (source as NSString).length))
+        XCTAssertEqual(h.editor.text, source)
+        XCTAssertNotNil(CommandRegistry.lookup(id: "paste"))
+    }
+
+    func testToolbarVisibilityCommandIsOnlyOfferedOnIPad() {
+        XCTAssertEqual(CommandRegistry.lookup(id: "toggleTB") == nil, DeviceIdiom.isPhone)
+        XCTAssertNotNil(FuzzyMatcher.bestScore("command palette", against: CommandRegistry.lookup(id: "palette")!))
+    }
+
+    func testProgrammaticSelectionDisplaysHighlightWithoutTouch() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previous?.makeKey() }
+        let h = Harness("hello world")
+        controller.view.addSubview(h.editor)
+        h.editor.layoutIfNeeded()
+        h.editor.focusForEditing()
+        h.editor.selectAll()
+        try await Task.sleep(for: .milliseconds(100))
+        h.editor.layoutIfNeeded()
+        func descendants(_ view: UIView) -> [UIView] {
+            [view] + view.subviews.flatMap { descendants($0) }
+        }
+        let views = descendants(window)
+        let displays = views.flatMap(\.interactions).compactMap { $0 as? UITextSelectionDisplayInteraction }
+        XCTAssertTrue(displays.contains { $0.isActivated && !$0.highlightView.selectionRects.isEmpty })
+        let highlights = views.filter { view in
+            guard let highlight = view as? any UITextSelectionHighlightView else { return false }
+            return !view.isHidden && view.alpha > 0 && highlight.selectionRects.contains { !$0.rect.isEmpty }
+        }
+        XCTAssertFalse(highlights.isEmpty, "Selecting text must show its highlight before any touch")
+        // A display installed/restored after the focus callback must also
+        // become visible at layout, without requiring another gesture.
+        for display in displays {
+            display.isActivated = false
+            display.view?.setNeedsLayout()
+            display.view?.layoutIfNeeded()
+            XCTAssertTrue(display.isActivated)
+        }
+        for _ in 0..<3 {
+            XCTAssertTrue(h.editor.resignFirstResponder())
+            XCTAssertTrue(h.editor.becomeFirstResponder())
+            h.editor.selectAll()
+            try await Task.sleep(for: .milliseconds(100))
+            let currentDisplays = descendants(window).flatMap(\.interactions)
+                .compactMap { $0 as? UITextSelectionDisplayInteraction }
+            XCTAssertTrue(currentDisplays.contains { $0.isActivated && !$0.highlightView.selectionRects.isEmpty })
+        }
+    }
+
+    func testProgrammaticSelectionNotifiesUIKitBeforeAndAfterTheChange() throws {
+        let h = Harness("hello 😀")
+        func input(in view: UIView) -> (any UITextInput)? {
+            if let input = view as? any UITextInput { return input }
+            return view.subviews.lazy.compactMap { input(in: $0) }.first
+        }
+        let input = try XCTUnwrap(input(in: h.editor))
+        let spy = SelectionDelegateSpy()
+        input.inputDelegate = spy
+        h.editor.setSelection(NSRange(location: 1, length: 0))
+        spy.events.removeAll()
+        h.editor.selectAll()
+        XCTAssertEqual(spy.events.map(\.0), ["will", "did"])
+        XCTAssertEqual(spy.events.map(\.1), [NSRange(location: 1, length: 0), NSRange(location: 0, length: 8)])
+    }
+
+    func testRegisteredSelectionCommandsUseUTF16Ranges() throws {
+        for source in ["", "hello", "😀 cafe\u{301}"] {
+            let h = Harness(source)
+            try XCTUnwrap(CommandRegistry.lookup(id: "selectAll")).action()
+            XCTAssertEqual(h.editor.selectedRange, NSRange(location: 0, length: (source as NSString).length))
+        }
+        let h = Harness("one two\nthree")
+        h.editor.setSelection(NSRange(location: 5, length: 0))
+        try XCTUnwrap(CommandRegistry.lookup(id: "selWord")).action()
+        XCTAssertEqual(h.editor.text(in: h.editor.selectedRange), "two")
+        try XCTUnwrap(CommandRegistry.lookup(id: "selLine")).action()
+        XCTAssertEqual(h.editor.text(in: h.editor.selectedRange), "one two\n")
+    }
+
+    func testRegisteredEditingCommandsChangeOnlyTheirTargetAndUndo() throws {
+        let cases: [(String, String, NSRange, String)] = [
+            ("transpose", "abcd", NSRange(location: 2, length: 0), "acbd"),
+            ("delEOL", "one two\nthree", NSRange(location: 4, length: 0), "one \nthree"),
+            ("delWordBack", "one two", NSRange(location: 7, length: 0), "one "),
+            ("delWordFwd", "one two", NSRange(location: 4, length: 0), "one "),
+            ("moveUp", "one\ntwo\nthree", NSRange(location: 4, length: 0), "two\none\nthree"),
+            ("moveDown", "one\ntwo\nthree", NSRange(location: 0, length: 0), "two\none\nthree"),
+            ("delLine", "one\ntwo\nthree", NSRange(location: 4, length: 0), "one\nthree"),
+            ("dupLine", "one\ntwo", NSRange(location: 4, length: 0), "one\ntwo\ntwo"),
+            ("indent", "one\ntwo", NSRange(location: 4, length: 3), "one\n\ttwo"),
+            ("outdent", "one\n\ttwo", NSRange(location: 4, length: 4), "one\ntwo"),
+            ("joinLines", "one\ntwo", NSRange(location: 0, length: 7), "one two"),
+            ("revSel", "one two", NSRange(location: 4, length: 3), "one owt"),
+            ("srParens", "one two", NSRange(location: 4, length: 3), "one (two)"),
+            ("mdBold", "one two", NSRange(location: 4, length: 3), "one **two**")
+        ]
+        for (id, source, selection, expected) in cases {
+            let h = Harness(source)
+            h.editor.setSelection(selection)
+            try XCTUnwrap(CommandRegistry.lookup(id: id)).action()
+            XCTAssertEqual(h.editor.text, expected, id)
+            CommandActions.undo()
+            XCTAssertEqual(h.editor.text, source, id + " undo")
+            CommandActions.redo()
+            XCTAssertEqual(h.editor.text, expected, id + " redo")
+        }
+    }
+
+    func testRegisteredNavigationAndSelectionSheetsKeepTheirEditor() throws {
+        let h = Harness("  one\ntwo")
+        h.editor.setSelection(NSRange(location: 5, length: 0))
+        let home = try XCTUnwrap(CommandRegistry.lookup(id: "smartHome"))
+        home.action()
+        XCTAssertEqual(h.editor.selectedRange, NSRange(location: 2, length: 0))
+        home.action()
+        XCTAssertEqual(h.editor.selectedRange, NSRange(location: 0, length: 0))
+        for (id, sheet) in [("selLinesContaining", EditorSheet.selectLinesContaining), ("clipHist", .clipboardHistory)] {
+            try XCTUnwrap(CommandRegistry.lookup(id: id)).action()
+            XCTAssertEqual(h.context.presentation.presentedSheet?.id, sheet.id)
+            XCTAssertTrue(h.context.presentation.presentedSheetOwner === h.tab.state)
+        }
+        try CommandActions.selectLinesContaining(query: "two", useRegex: false, caseSensitive: true)
+        XCTAssertEqual(h.editor.text(in: h.editor.selectedRange), "two")
+    }
+
+    func testClipboardQuickActionReplacesOnlyTheActiveStartPage() {
+        let context = BasicCommandContext()
+        CommandActions.context = context
+        let session = EditorSession()
+        context.scenes.registerSession(session)
+        let document = session.activeTab
+        document.startDocument(with: "keep this document")
+        let launcher = session.newTab(kind: .launcher)
+        session.tabSwitcherActive = true
+        let board = UIPasteboard.withUniqueName()
+        defer {
+            UIPasteboard.remove(withName: board.name)
+            session.tabs.forEach { $0.document.deleteScratchFile() }
+        }
+        board.string = "clipboard 😀  \n"
+        CommandActions.newFromClipboard(in: session, pasteboard: board)
+        XCTAssertEqual(session.tabs.count, 2)
+        XCTAssertTrue(session.activeTab === launcher)
+        XCTAssertFalse(session.tabSwitcherActive)
+        XCTAssertEqual(launcher.kind, .editor)
+        XCTAssertEqual(launcher.document.text, board.string)
+        XCTAssertEqual(document.document.text, "keep this document")
+        XCTAssertTrue(launcher.document.isDirty)
+        XCTAssertTrue(context.scenes.currentEditor === launcher.state)
+        // Once it is a document, a second clipboard request opens a tab.
+        CommandActions.newFromClipboard(in: session, pasteboard: board)
+        XCTAssertEqual(session.tabs.count, 3)
+        XCTAssertFalse(session.activeTab === launcher)
+    }
+
+    func testClipboardQuickActionPreservesTextAndExistingDocument() {
+        let context = BasicCommandContext()
+        CommandActions.context = context
+        let session = EditorSession()
+        context.scenes.registerSession(session)
+        let original = session.activeTab
+        original.startDocument(with: "keep me")
+        defer { session.tabs.forEach { $0.document.deleteScratchFile() } }
+        let board = UIPasteboard.withUniqueName()
+        defer { UIPasteboard.remove(withName: board.name) }
+        let exact = "Clipboard 😀 text   \r\nno forced newline"
+        board.string = exact
+        context.presentation.present(.findReplace, owner: original.state)
+        CommandActions.newFromClipboard(in: session, pasteboard: board)
+        XCTAssertEqual(session.tabs.count, 2)
+        XCTAssertEqual(original.document.text, "keep me")
+        XCTAssertEqual(session.activeTab.kind, .editor)
+        XCTAssertEqual(session.activeTab.document.text, exact)
+        XCTAssertEqual(session.activeTab.state.text, exact)
+        XCTAssertTrue(session.activeTab.document.isDirty)
+        XCTAssertNil(session.activeTab.document.fileURL)
+        XCTAssertTrue(context.scenes.currentSession === session)
+        XCTAssertNil(context.presentation.presentedSheet)
+        XCTAssertNil(context.presentation.presentedSheetOwner)
+        XCTAssertTrue(CommandActions.state === session.activeTab.state)
+        board.items = []
+        CommandActions.newFromClipboard(in: session, pasteboard: board)
+        XCTAssertEqual(session.tabs.count, 2)
+        XCTAssertNotNil(context.presentation.openErrorMessage)
+    }
+
     func testReplaceAllExpandingMatchesIsOneUndoableEdit() throws {
         let h = Harness("cat cat cat", find: FindContext(query: "cat", replacement: "elephant"))
         XCTAssertEqual(try CommandActions.replaceAllMatches(), 3)
@@ -478,4 +753,20 @@ private final class BasicCommandContext: CommandContext {
     var scenes = SceneRouter()
     var pickers = PickerIntents()
     var presentation = PresentationState()
+}
+
+@MainActor
+private final class SelectionDelegateSpy: NSObject, UITextInputDelegate {
+    var events: [(String, NSRange)] = []
+    func selectionWillChange(_ textInput: (any UITextInput)?) { record("will", textInput) }
+    func selectionDidChange(_ textInput: (any UITextInput)?) { record("did", textInput) }
+    func textWillChange(_ textInput: (any UITextInput)?) {}
+    func textDidChange(_ textInput: (any UITextInput)?) {}
+    func conversationContext(_ context: UIConversationContext?, didChange textInput: (any UITextInput)?) {}
+    private func record(_ event: String, _ input: (any UITextInput)?) {
+        guard let input, let range = input.selectedTextRange else { return }
+        events.append((event, NSRange(
+            location: input.offset(from: input.beginningOfDocument, to: range.start),
+            length: input.offset(from: range.start, to: range.end))))
+    }
 }

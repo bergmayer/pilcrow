@@ -1,11 +1,10 @@
 import SwiftUI
 
 /// Compact iPhone chrome preserves room for the document's name. File and
-/// settings actions share the existing menu; undo and redo stay one tap away.
+/// settings actions share Tool Menu; two quick buttons are configurable.
 struct PhoneEditorToolbar: ToolbarContent {
 
     let documentTitle: String
-    let showToolbarPref: Bool
     let claimFocus: () -> Void
 
     var body: some ToolbarContent {
@@ -20,25 +19,22 @@ struct PhoneEditorToolbar: ToolbarContent {
             )
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Button {
-                claimFocus()
-                CommandActions.undo()
-            } label: {
-                Image(systemName: "arrow.uturn.backward")
+            HStack(spacing: 2) {
+                QuickToolbarButtons(onInteraction: claimFocus, touchTarget: 34)
+                Button {
+                    claimFocus()
+                    CommandActions.presentCommandPalette()
+                } label: {
+                    Image(systemName: EditorChrome.commandPaletteSymbol)
+                            .font(.system(size: 16, weight: .regular))
+                        .frame(width: 34, height: 44)
+                }
+                .accessibilityLabel(EditorChrome.commandPaletteTitle)
+                .accessibilityIdentifier("command-palette")
+                combinedMenu
+                    .frame(width: 34, height: 44)
             }
-            .accessibilityLabel("Undo")
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-            Button {
-                claimFocus()
-                CommandActions.redo()
-            } label: {
-                Image(systemName: "arrow.uturn.forward")
-            }
-            .accessibilityLabel("Redo")
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-            combinedMenu
+            .buttonStyle(.plain)
         }
     }
 
@@ -46,12 +42,12 @@ struct PhoneEditorToolbar: ToolbarContent {
     private var combinedMenu: some View {
         let slots = ToolbarConfig.shared.slots
         Menu {
-            // Core actions stay available with customized toolbar actions hidden.
+            // Core actions stay available alongside the configured tools.
             Button {
                 claimFocus()
                 CommandActions.presentCommandPalette()
             } label: {
-                Label("Command Palette…", systemImage: "command.square")
+                Label(EditorChrome.commandPaletteTitle + "…", systemImage: EditorChrome.commandPaletteSymbol)
             }
             Button {
                 claimFocus()
@@ -65,7 +61,7 @@ struct PhoneEditorToolbar: ToolbarContent {
             } label: {
                 Label("Settings…", systemImage: "gear")
             }
-            if showToolbarPref, !slots.isEmpty {
+            if !slots.isEmpty {
                 Divider()
                 ForEach(slots) { slot in
                     if let cmd = CommandRegistry.lookup(id: slot.commandId) {
@@ -83,6 +79,7 @@ struct PhoneEditorToolbar: ToolbarContent {
             Image(systemName: "ellipsis.rectangle")
                 .symbolRenderingMode(.hierarchical)
         }
-        .accessibilityLabel("Toolbar Actions")
+        .accessibilityLabel(EditorChrome.toolMenuTitle)
+        .accessibilityIdentifier("tool-menu")
     }
 }
