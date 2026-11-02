@@ -85,8 +85,6 @@ final class ToolbarConfig {
             return slot
         }
         self.slots = loaded.filter { CommandRegistry.lookup(id: $0.commandId) != nil }
-        // Retired commands (including the former drafts browser) must not
-        // leave dead buttons in a previously customized toolbar.
         if slots != loaded { save() }
     }
 

@@ -6,6 +6,45 @@ import XCTest
 
 @MainActor
 final class BasicEditingTests: XCTestCase {
+    func testOpenTabSelectionKeepsExistingUnsavedBufferAndWindow() {
+        let router = SceneRouter()
+        let first = EditorSession()
+        let second = EditorSession()
+        let target = second.newTab(kind: .editor)
+        target.startDocument(with: "Unsaved text that must stay in this buffer")
+        second.selectedTabID = second.tabs[0].id
+        second.tabSwitcherActive = true
+        router.registerSession(first)
+        router.registerSession(second)
+        router.claimFocus(session: first)
+
+        XCTAssertTrue(router.selectOpenTab(target, in: second))
+        XCTAssertTrue(router.currentSession === second)
+        XCTAssertTrue(router.currentEditor === target.state)
+        XCTAssertTrue(second.activeTab === target)
+        XCTAssertFalse(second.tabSwitcherActive)
+        XCTAssertEqual(second.tabs.count, 2)
+        XCTAssertEqual(target.document.text, "Unsaved text that must stay in this buffer")
+        XCTAssertTrue(target.document.isDirty)
+        XCTAssertNil(target.document.fileURL)
+    }
+
+    func testOpenTabSelectionRejectsClosedTabsAndWindows() {
+        let router = SceneRouter()
+        let session = EditorSession()
+        let stale = session.newTab(kind: .editor)
+        router.registerSession(session)
+        session.tabs.removeAll { $0 === stale }
+        session.selectedTabID = session.tabs[0].id
+        XCTAssertFalse(router.selectOpenTab(stale, in: session))
+        session.isClosingWindow = true
+        XCTAssertFalse(router.selectOpenTab(session.activeTab, in: session))
+        session.isClosingWindow = false
+        router.deregisterSession(session)
+        XCTAssertFalse(router.selectOpenTab(session.activeTab, in: session))
+        XCTAssertNil(router.currentSession)
+    }
+
     @MainActor private final class Harness {
         let tab = TabModel()
         let editor = PilcrowTextView(frame: CGRect(x: 0, y: 0, width: 600, height: 800))

@@ -990,3 +990,49 @@ private func tapNativeClose(in app: XCUIApplication, withKeyboard: Bool = false)
     if !controls.buttons["Close-button"].exists { controls.tap() }
     controls.buttons["Close-button"].tap()
 }
+
+@MainActor
+final class HomeScreenOpenTabsUITests: XCTestCase {
+    func testHomeScreenShortcutSelectsAnExistingTab() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        defer { app.terminate() }
+        let springboard = try openHomeScreenMenu()
+        let shortcut = springboard.buttons["Open Windows and Tabs…"]
+        XCTAssertTrue(shortcut.waitForExistence(timeout: 5))
+        let menuImage = XCTAttachment(screenshot: springboard.screenshot())
+        menuImage.name = "Home Screen menu"
+        menuImage.lifetime = .keepAlways
+        add(menuImage)
+        XCTAssertFalse(springboard.buttons["Command Palette"].exists)
+        shortcut.tap()
+        let title = UIDevice.current.userInterfaceIdiom == .phone ? "Open Tabs" : "Open Windows and Tabs"
+        XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 10))
+        let pickerImage = XCTAttachment(screenshot: app.screenshot())
+        pickerImage.name = "Open windows and tabs"
+        pickerImage.lifetime = .keepAlways
+        add(pickerImage)
+        let tab = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "open-tab-")).firstMatch
+        XCTAssertTrue(tab.waitForExistence(timeout: 5))
+        tab.tap()
+        let dismissed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.navigationBars[title])
+        wait(for: [dismissed], timeout: 5)
+    }
+
+    private func openHomeScreenMenu() throws -> XCUIApplication {
+        XCUIDevice.shared.press(.home)
+        XCUIDevice.shared.press(.home)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let icons = springboard.icons.matching(identifier: "Pilcrow")
+        var visibleIcon: XCUIElement?
+        for _ in 0..<6 {
+            visibleIcon = icons.allElementsBoundByIndex.first { $0.isHittable }
+            if visibleIcon != nil { break }
+            springboard.swipeLeft()
+        }
+        let icon = try XCTUnwrap(visibleIcon, "Pilcrow must have a visible Home Screen icon")
+        icon.press(forDuration: 1.5)
+        return springboard
+    }
+}

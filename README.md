@@ -10,6 +10,7 @@ Pilcrow is a plain-text editor for iPad and iPhone, requiring iPadOS or iOS 27 o
 - Choose **Settings → Editor → New Windows and Tabs** to set **New Windows Open With** and **New Tabs Open With** separately to **Start Page** or **Blank Document**. The defaults remain Start Page for windows and Blank Document for tabs. Restored work keeps its contents; closing the last tab still returns to the start page.
 - Use multiple windows. Each window can contain multiple tabs. On iPad, **Settings → Editor → Window Layout → Document Tabs** chooses a tab bar or a document list on the left. Narrow windows open that list with the **Documents** button.
 - Use the command palette to browse, find, and run editor commands.
+- Touch and hold the Home Screen icon and choose **Open Windows and Tabs…** to select an existing tab, including unsaved documents. On iPad, tabs are grouped by window; the system's Open Windows entries use the selected document's title. The separate system Recents list is managed by iPadOS.
 - Open the file browser, multi-file search, settings, and Markdown preview in separate windows.
 
 ## New window options

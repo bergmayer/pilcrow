@@ -84,9 +84,7 @@ struct EditorView: View {
         // `.alert` not `.confirmationDialog`: iPad popover-with-tail needs
         // an anchor, and close paths come from disparate places (tab
         // strip, switcher, ⌘W, palette) with no single sensible anchor.
-        // Each alert is its own ViewModifier — the trailing-closure
-        // alert API counts heavily against the type-checker budget and
-        // stacking them inline previously exceeded that budget.
+        // Separate ViewModifiers bound the type-checker workload.
         .modifier(OpenErrorAlertModifier(
             presented: openErrorAlertBinding,
             message: bus.presentation.openErrorMessage
@@ -607,6 +605,22 @@ struct EditorView: View {
                         // so UIKit displays it and subsequent typing edits it.
                         CommandActions.actions?.focusForEditing()
                         command.action()
+                    }
+                }
+            }
+        case .openWindowsAndTabs:
+            OpenWindowsAndTabsSheet { targetSession, tab in
+                commandAfterDismiss = {
+                    let router = AppStateBus.shared.scenes
+                    guard router.selectOpenTab(tab, in: targetSession) else { return }
+                    if let scene = SessionsStore.shared.scene(forSceneUUID: targetSession.sceneUUID) {
+                        UIApplication.shared.requestSceneSessionActivation(
+                            scene.session, userActivity: nil, options: nil
+                        ) { error in
+                            Task { @MainActor in
+                                AppStateBus.shared.presentation.openErrorMessage = error.localizedDescription
+                            }
+                        }
                     }
                 }
             }

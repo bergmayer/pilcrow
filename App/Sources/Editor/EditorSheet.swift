@@ -23,6 +23,7 @@ enum EditorSheet: Identifiable {
     case clipboardHistory
     case templatePicker
     case tabSwitcher
+    case openWindowsAndTabs
     case processLines
     case canonize
     case characterPanel
@@ -59,6 +60,7 @@ enum EditorSheet: Identifiable {
         case .clipboardHistory:      return "clipboardHistory"
         case .templatePicker:        return "templatePicker"
         case .tabSwitcher:           return "tabSwitcher"
+        case .openWindowsAndTabs:    return "openWindowsAndTabs"
         case .processLines:          return "processLines"
         case .canonize:              return "canonize"
         case .characterPanel:        return "characterPanel"

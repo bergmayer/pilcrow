@@ -852,8 +852,9 @@ enum DraftRecoveryWorkflow {
         into tab: TabModel,
         store: DraftsStore = .shared
     ) async throws -> SourceStaleCheck? {
-        let loaded = try await store.loadForRestoration(draft)
-        let source = await loadSource(from: draft.metadata)
+        async let draftRead = store.loadForRestoration(draft)
+        async let sourceRead = loadSource(from: draft.metadata)
+        let (loaded, source) = try await (draftRead, sourceRead)
         try Task.checkCancellation()
         applyDraft(loaded.text, at: loaded.url, byteCount: draft.bytes, to: tab)
 

@@ -407,3 +407,109 @@ private struct TabCard: View {
         return lines.joined(separator: "\n")
     }
 }
+
+/// App-icon entry point: only live tabs and OS-retained editor windows.
+/// Recent-file history and archived recovery records never enter this list.
+struct OpenWindowsAndTabsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    private let router = AppStateBus.shared.scenes
+    let onSelect: (EditorSession, TabModel) -> Void
+
+    private var sessions: [EditorSession] {
+        router.allOpenSessions.filter { !$0.isClosingWindow }
+    }
+
+    private var disconnectedWindows: [SessionRecord] {
+        let liveIDs = Set(sessions.map(\.sceneUUID))
+        let retainedIDs = Set(UIApplication.shared.openSessions.map(\.persistentIdentifier))
+        return SessionsStore.shared.records.filter {
+            !liveIDs.contains($0.sceneUUID) &&
+            $0.persistentIdentifier.map { retainedIDs.contains($0) } == true
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(sessions.enumerated()), id: \.offset) { index, session in
+                    Section(DeviceIdiom.supportsMultipleWindows ? "Window \(index + 1)" : "Tabs") {
+                        ForEach(session.tabs.filter { matches(title(for: $0)) }) { tab in
+                            Button {
+                                onSelect(session, tab)
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    Image(systemName: tab.kind == .fileBrowser ? "folder" : "doc.text")
+                                    VStack(alignment: .leading) {
+                                        Text(title(for: tab))
+                                        if let url = tab.document.fileURL {
+                                            Text(url.deletingLastPathComponent().lastPathComponent)
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        if tab.needsCloseConfirmation {
+                                            Text("Unsaved Changes").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    if session.selectedTabID == tab.id {
+                                        Image(systemName: "checkmark").foregroundStyle(.secondary)
+                                    }
+                                }
+                                .foregroundStyle(.primary)
+                            }
+                            .accessibilityIdentifier("open-tab-\(tab.id.uuidString)")
+                        }
+                    }
+                }
+                ForEach(disconnectedWindows.filter { matches(windowTitle($0)) }, id: \.sceneUUID) { record in
+                    Button {
+                        guard let retained = UIApplication.shared.openSessions.first(where: {
+                            $0.persistentIdentifier == record.persistentIdentifier
+                        }) else { return }
+                        dismiss()
+                        UIApplication.shared.requestSceneSessionActivation(
+                            retained, userActivity: nil, options: nil
+                        ) { error in
+                            Task { @MainActor in
+                                AppStateBus.shared.presentation.openErrorMessage = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        Label("\(windowTitle(record)) · \(record.tabs.count) tabs", systemImage: "macwindow")
+                    }
+                }
+            }
+            .overlay {
+                if sessions.isEmpty && disconnectedWindows.isEmpty {
+                    ContentUnavailableView("No Open Windows or Tabs", systemImage: "square.on.square")
+                }
+            }
+            .searchable(text: $query, prompt: "Find an open tab")
+            .navigationTitle(DeviceIdiom.supportsMultipleWindows ? "Open Windows and Tabs" : "Open Tabs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func matches(_ title: String) -> Bool {
+        query.isEmpty || title.localizedStandardContains(query)
+    }
+
+    private func title(for tab: TabModel) -> String {
+        switch tab.kind {
+        case .launcher: return "New Document"
+        case .fileBrowser: return "Open File"
+        case .editor: return tab.document.displayName
+        }
+    }
+
+    private func windowTitle(_ record: SessionRecord) -> String {
+        guard record.tabs.indices.contains(record.activeIndex) else { return "Window" }
+        return record.tabs[record.activeIndex].displayName ?? "Untitled"
+    }
+}

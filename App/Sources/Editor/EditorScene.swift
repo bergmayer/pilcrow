@@ -188,6 +188,8 @@ struct EditorScene: View {
             }
             .background(SceneRegistrationBridge(
                 sceneUUID: sceneUUID,
+                title: session.activeTab.kind == .editor ? document.displayName
+                    : (session.activeTab.kind == .fileBrowser ? "Open File" : "New Document"),
                 unsavedDocumentCount: session.isClosingWindow ? 0 : session.unsavedDocumentCount,
                 onReview: { reviewClose(.window) },
                 onClose: discardWindowAndClose
@@ -752,12 +754,13 @@ struct EditorScene: View {
 
     private func applyHomeShortcut(_ shortcut: HomeShortcut) {
         switch shortcut {
+        case .openWindowsAndTabs:
+            bus.scenes.claimFocus(session: session)
+            bus.presentation.presentedSheet = .openWindowsAndTabs
         case .newFile:
             openWindow(id: SceneID.editor.rawValue, value: EditorRoute.newDocument())
         case .newFromClipboard:
             CommandActions.newFromClipboard(in: session)
-        case .commandPalette:
-            CommandActions.presentCommandPalette()
         }
     }
 

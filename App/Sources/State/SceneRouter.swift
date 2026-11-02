@@ -106,6 +106,20 @@ final class SceneRouter {
         allOpenSessions.first { $0.tabs.contains { $0.id == tabID } }
     }
 
+    /// Select the existing buffer before asking UIKit to foreground its window.
+    /// A stale overview row must never reopen a closed tab from a file URL.
+    @discardableResult
+    func selectOpenTab(_ tab: TabModel, in session: EditorSession) -> Bool {
+        guard !session.isClosingWindow,
+              allOpenSessions.contains(where: { $0 === session }),
+              session.tabs.contains(where: { $0 === tab }) else { return false }
+        session.selectedTabID = tab.id
+        session.tabSwitcherActive = false
+        claimFocus(session: session)
+        tab.state.requestEditorFocus()
+        return true
+    }
+
     /// Single source of truth for "is this scene the foreground one."
     /// Used to gate per-scene sheets/pickers/alerts so a shared bus flag
     /// surfaces them on the focused window only. EditorView and
@@ -130,7 +144,7 @@ enum SceneID: String {
 /// `rawValue` must match the `UIApplicationShortcutItemType` strings
 /// declared in Info.plist under `UIApplicationShortcutItems`.
 enum HomeShortcut: String {
+    case openWindowsAndTabs = "com.palefire.pilcrow.shortcut.openWindowsAndTabs"
     case newFromClipboard = "com.palefire.pilcrow.shortcut.newFromClipboard"
     case newFile        = "com.palefire.pilcrow.shortcut.newFile"
-    case commandPalette = "com.palefire.pilcrow.shortcut.commandPalette"
 }

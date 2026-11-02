@@ -70,7 +70,7 @@ enum DocumentLocation {
         //    inside a known provider's user-visible root. The display
         //    name comes from the provider extension itself, so
         //    Nextcloud's Files-app entry "Nextcloud" wins over the
-        //    folder-name heuristic that previously surfaced the
+        //    folder-name heuristic that exposes the
         //    account login (e.g. "admin").
         if let displayName = providerDisplayName(forPathIn: parent) {
             let remainder = remainingPath(of: parent, afterProviderPrefix: providerPrefix(for: parent))

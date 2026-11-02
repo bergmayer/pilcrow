@@ -657,8 +657,10 @@ enum SessionRestore {
                 }
             }
 
-            guard let draft = await loadDraft(draft, fallbackURL: draftURL, allowEmpty: snapshot.fileBookmark != nil) else { return }
-            guard let source = await loadSource(resolvedSource) else { return }
+            async let draftRead = loadDraft(draft, fallbackURL: draftURL, allowEmpty: snapshot.fileBookmark != nil)
+            async let sourceRead = loadSource(resolvedSource)
+            let (draftResult, sourceResult) = await (draftRead, sourceRead)
+            guard let draft = draftResult, let source = sourceResult else { return }
             guard !Task.isCancelled else { return }
 
             let liveText = state.textView?.text ?? state.text
@@ -864,6 +866,7 @@ enum SessionRestore {
 struct SceneRegistrationBridge: UIViewRepresentable {
 
     let sceneUUID: String
+    let title: String
     let unsavedDocumentCount: Int
     let onReview: () -> Void
     let onClose: () -> Void
@@ -882,9 +885,11 @@ struct SceneRegistrationBridge: UIViewRepresentable {
         // `onAppear` once `applySessionRestoreIfNeeded` runs. The
         // dispatch hops past this render so `view.window` is wired.
         let uuid = sceneUUID
+        let title = title
         guard !uuid.isEmpty else { return }
         DispatchQueue.main.async {
             guard let scene = uiView.window?.windowScene else { return }
+            if scene.title != title { scene.title = title }
             SessionsStore.shared.register(scene, sceneUUID: uuid)
         }
     }
