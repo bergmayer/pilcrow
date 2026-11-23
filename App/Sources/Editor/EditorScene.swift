@@ -182,8 +182,7 @@ struct EditorScene: View {
                 AppStateBus.shared.scenes.deregisterSession(session)
                 persistSessionRecord()
                 for tab in session.tabs {
-                    tab.state.loadTask?.cancel()
-                    tab.state.loadTask = nil
+                    tab.document.invalidateLoad()
                 }
             }
             .background(SceneRegistrationBridge(
@@ -415,7 +414,7 @@ struct EditorScene: View {
         let preferred = bus.scenes.currentEditor
         let editor = tab.owns(preferred) ? (preferred ?? tab.state) : tab.state
         let target = PickerTarget(intent: intent, tab: tab, editor: editor,
-            loadGeneration: tab.state.loadGeneration, bufferRevision: tab.document.bufferRevision,
+            loadGeneration: tab.document.loadGeneration, bufferRevision: tab.document.bufferRevision,
             selection: editor.textView?.selectedRange ?? editor.selectedRange,
             sourceURL: tab.document.fileURL, displayName: tab.document.fileURL?.lastPathComponent
                 ?? LanguageRegistry.suggestedFilename(tab.document.displayName, language: editor.languageIdentifier))
@@ -797,7 +796,7 @@ private struct PickerTarget: Sendable {
 
     @MainActor func isCurrent(in session: EditorSession) -> Bool {
         !session.isClosingWindow && session.tabs.contains { $0 === tab }
-            && tab.state.loadGeneration == loadGeneration && tab.document.fileURL == sourceURL
+            && tab.document.loadGeneration == loadGeneration && tab.document.fileURL == sourceURL
     }
 }
 

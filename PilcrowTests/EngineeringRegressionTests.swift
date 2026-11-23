@@ -555,6 +555,32 @@ final class EngineeringRegressionTests: XCTestCase {
         }
     }
 
+    func test_indentFoldsSkipEdgeBlankLinesAndKeepInteriorBlankLines() {
+        let text = "parent\r\n\r  child\n\tgrandchild\r\n \n  sibling\r\n\rnext\n" as NSString
+        let regions = FoldDiscovery.allFoldableHeaders(in: text, language: .swift)
+        XCTAssertEqual(regions.map(\.headerRow), [0, 2])
+        XCTAssertEqual(regions.map(\.bodyRange), [2...5, 3...3])
+        XCTAssertEqual(FoldDiscovery.bodyRange(forHeaderRow: 0, in: text, language: .swift), 2...5)
+        XCTAssertNil(FoldDiscovery.bodyRange(forHeaderRow: 5, in: text, language: .swift))
+    }
+
+    func test_lineCaretLookupUsesTheTrailingEmptyRow() {
+        let editor = PilcrowTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 400))
+        editor.text = "😀\r\nbody\r"
+        editor.layoutIfNeeded()
+        XCTAssertEqual(editor.caretRect(atLine: 1), editor.caretRect(atCharacterIndex: 4))
+        XCTAssertEqual(editor.caretRect(atLine: 2), editor.caretRect(atCharacterIndex: 9))
+        XCTAssertNotEqual(editor.caretRect(atLine: 2), editor.caretRect(atLine: 0))
+        XCTAssertNil(editor.caretRect(atLine: 3))
+    }
+
+    func test_goToLineEndPlacesCaretAfterContentBeforeDelimiter() {
+        let editor = PilcrowTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 400))
+        editor.text = "first\r\n😀body\r\nlast"
+        XCTAssertTrue(editor.goToLine(1, select: .end))
+        XCTAssertEqual(editor.selectedRange, NSRange(location: 13, length: 0))
+    }
+
     func test_headingScanPreservesLiteralHashesAndRejectsNonHeadings() {
         let text = "# C#\n## title#\n### title ###\n#not-a-heading\n####### no\nplain" as NSString
         XCTAssertEqual(OutlineBuilder.build(in: text).map(\.title), ["C#", "title#", "title"])
@@ -992,6 +1018,107 @@ final class EngineeringRegressionTests: XCTestCase {
         } catch {}
     }
 
+    func test_folderSearchBoundsConcurrentReadsAndReturnsPathOrder() async throws {
+        actor ReadGate {
+            let ready: XCTestExpectation
+            var held: [CheckedContinuation<Void, Never>] = []
+            var released = false
+
+            init(ready: XCTestExpectation) { self.ready = ready }
+
+            func enter() async {
+                guard !released else { return }
+                await withCheckedContinuation { continuation in
+                    held.append(continuation)
+                    if held.count == 4 { ready.fulfill() }
+                }
+            }
+
+            func release() -> Int {
+                let count = held.count
+                released = true
+                for continuation in held.reversed() { continuation.resume() }
+                held.removeAll()
+                return count
+            }
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let names = (0..<9).map { "\($0).txt" }
+        for name in names {
+            try Data().write(to: root.appendingPathComponent(name))
+        }
+        let ready = expectation(description: "Four overlapping reads")
+        let gate = ReadGate(ready: ready)
+        let task = Task {
+            try await MultiFileSearchSheet.SearchEngine.runFolderSearch(
+                folder: root,
+                matcher: .init(regex: nil, literal: "cat", caseSensitive: true),
+                extensions: ["txt"]
+            ) { url in
+                await gate.enter()
+                if url.lastPathComponent == "1.txt" { throw CocoaError(.fileReadNoPermission) }
+                return ("cat", Data(url.lastPathComponent.utf8))
+            }
+        }
+        await fulfillment(of: [ready], timeout: 5)
+        let concurrentReads = await gate.release()
+        let output = try await task.value
+        XCTAssertEqual(concurrentReads, 4)
+        XCTAssertEqual(output.sourcesScanned, 9)
+        XCTAssertEqual(output.results.map(\.groupLabel), names.filter { $0 != "1.txt" })
+        XCTAssertTrue(output.issues.contains { $0.hasPrefix("1.txt:") })
+    }
+
+    func test_longSearchPreviewIncludesMatchNearTheEndOfTheLine() throws {
+        let text = String(repeating: "😀", count: 4_000) + "found"
+        let matcher = MultiFileSearchSheet.SearchEngine.Matcher(regex: nil, literal: "found", caseSensitive: true)
+        let hits = matcher.matches(in: text, groupKey: .tab(UUID()), groupLabel: "Buffer",
+                                   fileURL: nil, limit: 10)
+
+        let hit = try XCTUnwrap(hits.first)
+        XCTAssertEqual(hit.range, NSRange(location: 8_000, length: 5))
+        XCTAssertTrue(hit.preview.hasPrefix("…"))
+        XCTAssertTrue(hit.preview.hasSuffix("found"))
+        XCTAssertLessThan(hit.preview.utf16.count, 250)
+    }
+
+    func test_folderSearchCancellationJoinsAllStartedReads() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for index in 0..<8 {
+            try Data().write(to: root.appendingPathComponent("\(index).txt"))
+        }
+        let ready = expectation(description: "All reads in the first batch started")
+        ready.expectedFulfillmentCount = 4
+        let finished = AsyncStream<Void>.makeStream()
+        let task = Task {
+            try await MultiFileSearchSheet.SearchEngine.runFolderSearch(
+                folder: root,
+                matcher: .init(regex: nil, literal: "cat", caseSensitive: true),
+                extensions: ["txt"]
+            ) { _ in
+                ready.fulfill()
+                defer { finished.continuation.yield(()) }
+                try await Task.sleep(for: .seconds(60))
+                return ("cat", Data())
+            }
+        }
+        await fulfillment(of: [ready], timeout: 5)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled search must throw")
+        } catch is CancellationError {}
+        finished.continuation.finish()
+        var ends = 0
+        for await _ in finished.stream { ends += 1 }
+        XCTAssertEqual(ends, 4)
+    }
+
     func test_newSplitPaneStartsWithLatestUnflushedText() async throws {
         let document = PlainTextDocument()
         document.text = "a"
@@ -1228,38 +1355,98 @@ final class EngineeringRegressionTests: XCTestCase {
     func test_closingTabCancelsPendingWork() async {
         let session = EditorSession()
         let tab = session.activeTab
-        let load = Task<Void, Never> { @MainActor in
+        let load = tab.document.startLoad { _ in
             try? await Task.sleep(for: .seconds(60))
         }
         let autosave = Task<Void, Never> { @MainActor in
             try? await Task.sleep(for: .seconds(60))
         }
-        tab.state.loadTask = load
         tab.state.autoSaveTask = autosave
         session.closeTab(tab.id, disposition: .discard)
         XCTAssertTrue(load.isCancelled)
         XCTAssertTrue(autosave.isCancelled)
-        XCTAssertNil(tab.state.loadTask)
+        XCTAssertNil(tab.document.loadTask)
         await load.value
         await autosave.value
     }
 
-    func test_failedAsyncLoadPreservesExistingDocument() async throws {
+    func test_supersededLoadLeavesReplacementOwnedByDocument() async {
         let document = PlainTextDocument()
+        let oldGate = AsyncStream<Void>.makeStream()
+        let newGate = AsyncStream<Void>.makeStream()
+        let old = document.startLoad { _ in
+            for await _ in oldGate.stream { break }
+        }
+        let replacement = document.startLoad { _ in
+            for await _ in newGate.stream { break }
+        }
+
+        oldGate.continuation.finish()
+        await old.value
+        XCTAssertTrue(old.isCancelled)
+        XCTAssertTrue(document.isLoading)
+        newGate.continuation.finish()
+        await replacement.value
+        XCTAssertFalse(document.isLoading)
+    }
+
+    func test_recoveryWritesKeepNewestSnapshotAndReuseOneFile() async throws {
+        let document = PlainTextDocument()
+        defer { document.deleteScratchFile() }
+        document.text = "first"
+        let first = document.scheduleRecoveryWrite()
+        document.text = "latest 😀"
+        let second = document.scheduleRecoveryWrite()
+
+        let firstCommitted = try await first.value
+        let firstURL = try XCTUnwrap(document.draftURL)
+        let secondCommitted = try await second.value
+        XCTAssertTrue(firstCommitted)
+        XCTAssertTrue(secondCommitted)
+        let url = try XCTUnwrap(document.draftURL)
+        XCTAssertEqual(firstURL, url)
+        let restored = try await DraftsStore.readText(at: url)
+        XCTAssertEqual(restored, "latest 😀")
+    }
+
+    func test_discardInvalidatesQueuedRecoveryBeforeAnotherCheckpoint() async throws {
+        let document = PlainTextDocument()
+        defer { document.deleteScratchFile() }
+        document.text = "discarded"
+        let obsolete = document.scheduleRecoveryWrite()
+        document.deleteScratchFile()
+        document.text = "keep"
+        let current = document.scheduleRecoveryWrite()
+
+        let obsoleteCommitted = try await obsolete.value
+        let currentCommitted = try await current.value
+        XCTAssertFalse(obsoleteCommitted)
+        XCTAssertTrue(currentCommitted)
+        let url = try XCTUnwrap(document.draftURL)
+        let text = try await DraftsStore.readText(at: url)
+        XCTAssertEqual(text, "keep")
+    }
+
+    func test_failedAsyncLoadPreservesExistingDocument() async throws {
+        let tab = TabModel()
+        let document = tab.document
+        let presentation = AppStateBus.shared.presentation
+        let previousError = presentation.openErrorMessage
+        defer { presentation.openErrorMessage = previousError }
         document.text = "unsaved"
         document.isDirty = true
         document.fileURL = URL(fileURLWithPath: "/original.txt")
-        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString)
-        do {
-            try await document.loadAsync(from: missing)
-            XCTFail("A missing file should fail")
-        } catch {
-            XCTAssertEqual(document.text, "unsaved")
-            XCTAssertTrue(document.isDirty)
-            XCTAssertEqual(document.fileURL?.path, "/original.txt")
-            XCTAssertFalse(document.isLoading)
-        }
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+
+        DocumentWorkflow.open(missing, in: tab)
+        XCTAssertTrue(document.isLoading)
+        await document.loadTask?.value
+
+        XCTAssertEqual(document.text, "unsaved")
+        XCTAssertTrue(document.isDirty)
+        XCTAssertEqual(document.fileURL?.path, "/original.txt")
+        XCTAssertFalse(document.isLoading)
+        XCTAssertTrue(presentation.openErrorMessage?.contains(missing.lastPathComponent) == true)
     }
 }
 
@@ -1282,7 +1469,7 @@ extension EngineeringRegressionTests {
             try? FileManager.default.removeItem(at: directory)
         }
         for tab in [first, second, inactive] {
-            try await tab.document.loadAsync(from: source)
+            tab.document.applyPayload(try await PlainTextDocument.readPayload(from: source), url: source)
             tab.document.text = "edits in \(tab.id) 😀"
             tab.state.text = tab.document.text
             tab.document.isDirty = true
@@ -1440,7 +1627,7 @@ extension EngineeringRegressionTests {
             AppStateBus.shared.presentation.sourceStaleCheck = previousStale
             try? FileManager.default.removeItem(at: directory)
         }
-        try await tab.document.loadAsync(from: source)
+        tab.document.applyPayload(try await PlainTextDocument.readPayload(from: source), url: source)
         let baselineDate = tab.document.sourceMtimeAtLoad
         let baselineSize = tab.document.sourceSizeAtLoad
         tab.document.text = "older lifecycle snapshot"
@@ -1455,7 +1642,7 @@ extension EngineeringRegressionTests {
         try Data("externally changed source with different length".utf8).write(to: source)
 
         SessionRestore.apply(record, to: restored)
-        await restored.activeTab.state.loadTask?.value
+        await restored.activeTab.document.loadTask?.value
 
         XCTAssertEqual(restored.activeTab.document.text, tab.document.text)
         XCTAssertTrue(restored.activeTab.needsCloseConfirmation)
@@ -1485,7 +1672,7 @@ extension EngineeringRegressionTests {
         XCTAssertEqual(record.tabs.first?.scratchFilename, tab.document.scratchFilename)
 
         SessionRestore.apply(record, to: restored)
-        await restored.activeTab.state.loadTask?.value
+        await restored.activeTab.document.loadTask?.value
 
         XCTAssertEqual(restored.activeTab.document.text, tab.document.text)
         XCTAssertTrue(restored.activeTab.needsCloseConfirmation)
@@ -1519,7 +1706,7 @@ extension EngineeringRegressionTests {
                     isPinned: false)
             ], activeIndex: 0, lastModified: Date(), launchID: "legacy", persistentIdentifier: nil)
         SessionRestore.apply(record, to: session)
-        await session.activeTab.state.loadTask?.value
+        await session.activeTab.document.loadTask?.value
         XCTAssertEqual(session.activeTab.document.text, "")
         XCTAssertTrue(session.activeTab.needsCloseConfirmation)
         XCTAssertEqual(try String(contentsOf: source, encoding: .utf8), "saved source text")
@@ -1537,7 +1724,7 @@ extension EngineeringRegressionTests {
             for tab in original.tabs + destination.tabs { tab.document.deleteScratchFile() }
         }
         SessionRestore.apply(record, to: destination, append: true)
-        await destination.activeTab.state.loadTask?.value
+        await destination.activeTab.document.loadTask?.value
         XCTAssertEqual(destination.tabs.count, 2)
         XCTAssertTrue(destination.tabs.first === existing)
         XCTAssertEqual(existing.document.text, "keep this current work")

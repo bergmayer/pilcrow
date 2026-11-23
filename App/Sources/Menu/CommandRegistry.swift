@@ -213,7 +213,7 @@ enum CommandRegistry {
                       owner?.inspectorOpen = true
                   }),
             .init(id: "fileInfo",     title: "Show File Information",        category: .view, shortcutHint: "⌥⌘I", synonyms: ["file info", "inspector", "metadata", "details", "outline panel"], action: CommandActions.toggleInspector),
-            .init(id: "mdPreview",    title: "Markdown Preview…",           category: .markdown, shortcutHint: "⌥⌘P", synonyms: ["render", "html preview"], action: CommandActions.presentMarkdownPreview),
+            .init(id: "mdPreview",    title: "Toggle HTML / Markdown Preview", category: .view, shortcutHint: "⌥⌘P", synonyms: ["render", "html preview"], action: CommandActions.presentMarkdownPreview),
             .init(id: "reflow",       title: "Reflow Paragraph (80 cols)",  category: .format,   synonyms: ["hard wrap", "rewrap", "paragraph fill", "fill"], action: { CommandActions.reflowParagraph(column: 80) }),
             .init(id: "processLines", title: "Process Lines Containing…",   category: .text, synonyms: ["filter lines", "extract lines", "keep matching", "delete matching"], action: CommandActions.presentProcessLines),
             .init(id: "canonize",     title: "Canonize / Text Merge…",      category: .text, synonyms: ["batch find replace", "lookup table", "table replace"], action: CommandActions.presentCanonize),

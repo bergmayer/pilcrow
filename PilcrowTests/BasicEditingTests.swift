@@ -637,7 +637,7 @@ final class BasicEditingTests: XCTestCase {
     func testExternalChangeRefreshesCleanBuffer() async throws {
         let url = try temporaryFile("old")
         let tab = TabModel()
-        try await tab.document.loadAsync(from: url)
+        tab.document.applyPayload(try await PlainTextDocument.readPayload(from: url), url: url)
         DocumentWorkflow.applyLoadedDocument(tab.document, at: url, to: tab.state)
         try Data("new".utf8).write(to: url, options: .atomic)
         await DocumentWorkflow.refreshExternalSource(tab, at: url)
@@ -649,7 +649,7 @@ final class BasicEditingTests: XCTestCase {
     func testExternalChangePreservesDirtyBufferAndReportsConflict() async throws {
         let url = try temporaryFile("old")
         let tab = TabModel()
-        try await tab.document.loadAsync(from: url)
+        tab.document.applyPayload(try await PlainTextDocument.readPayload(from: url), url: url)
         DocumentWorkflow.applyLoadedDocument(tab.document, at: url, to: tab.state)
         tab.document.text = "my edits"
         tab.document.isDirty = true
@@ -663,7 +663,7 @@ final class BasicEditingTests: XCTestCase {
     func testMissingSourcePreservesBufferAndReportsFailure() async throws {
         let url = try temporaryFile("keep this")
         let tab = TabModel()
-        try await tab.document.loadAsync(from: url)
+        tab.document.applyPayload(try await PlainTextDocument.readPayload(from: url), url: url)
         DocumentWorkflow.applyLoadedDocument(tab.document, at: url, to: tab.state)
         try FileManager.default.removeItem(at: url)
         await DocumentWorkflow.refreshExternalSource(tab, at: url)

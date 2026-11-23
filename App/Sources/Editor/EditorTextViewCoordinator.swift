@@ -22,22 +22,15 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
     /// Debounced snapshot back into `state.text` / `document.text`
     /// for the eventual-consistency consumers.
     var bufferSnapshotTask: Task<Void, Never>?
-    /// Skips the O(N) fold walk when nothing relevant has
-    /// changed — SwiftUI fires updateUIView on every observable
-    /// mutation regardless of buffer state.
-    private var foldCacheKey: (length: Int, language: LanguageIdentifier, userFolds: String)?
+    private struct FoldKey: Equatable {
+        let generation: UInt64
+        let language: LanguageIdentifier
+        let userFolds: Set<ClosedRange<Int>>
+    }
+
+    private var foldCacheKey: FoldKey?
     weak var bookmarkOverlay: BookmarkGutterOverlay?
     weak var changeHistoryOverlay: ChangeHistoryGutterOverlay?
-    /// Cached so the debounced refresh skips `components(separatedBy:)`
-    /// when the sources haven't moved.
-    var changeHistoryBaselineCache: String?
-    var changeHistoryCurrentCache: String?
-    /// `updateUIView` fires per body re-eval — i.e. every
-    /// keystroke on a big file. Splitting both baseline + buffer
-    /// by "\n" on each call is ~22k allocs on Moby Dick. The
-    /// debounce coalesces them into one re-split after the user
-    /// pauses; diff bars update a beat late, typing stays snappy.
-    var overlayRefreshTask: Task<Void, Never>?
     /// `AppTheme.current(...)` returns a fresh reference each
     /// call; the engine's `theme.didSet` uses `!==`. Reassigning
     /// an equivalent theme per render invalidates every line
@@ -69,7 +62,6 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
         if !document.isDirty { document.isDirty = true }
         document.bufferRevision &+= 1
         scheduleBufferSnapshot(from: textView)
-        foldCacheKey = nil
         refreshFoldableRegions(textView)
     }
 
@@ -84,16 +76,13 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
         coordinator.isApplyingSiblingSync = true
         defer { coordinator.isApplyingSiblingSync = false }
         sibling.applySynchronizedEdit(in: range, replacementText: text)
-        coordinator.foldCacheKey = nil
         coordinator.refreshFoldableRegions(sibling)
     }
 
-    /// Window matches the change-history overlay so both refresh
-    /// in the same render pass.
     private func scheduleBufferSnapshot(from textView: EditorEngine.TextView) {
         bufferSnapshotTask?.cancel()
         bufferSnapshotTask = Task { @MainActor [weak self, weak textView] in
-            try? await Task.sleep(for: Timing.changeHistoryOverlayDebounce)
+            try? await Task.sleep(for: Timing.bufferSnapshotDebounce)
             guard !Task.isCancelled, let self, let textView else { return }
             flushBufferSnapshot(from: textView)
         }
@@ -117,32 +106,27 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
 
     func refreshFoldableRegions(_ textView: EditorEngine.TextView) {
         guard !state.isLargeFile else {
-            textView.foldableRegions = []
+            if foldCacheKey != nil {
+                textView.foldableRegions = []
+                foldCacheKey = nil
+            }
             return
         }
-        let length = (textView.text as NSString).length
-        // User-fold fingerprint included so an ad-hoc fold's
-        // chevron appears immediately.
-        let userFingerprint = state.userFoldedBodyRanges
-            .map { "\($0.lowerBound)-\($0.upperBound)" }
-            .sorted()
-            .joined(separator: ",")
-        let key = (length: length, language: state.languageIdentifier, userFolds: userFingerprint)
-        if let cached = foldCacheKey,
-           cached.length == key.length,
-           cached.language == key.language,
-           cached.userFolds == key.userFolds {
-            return
-        }
+        let key = FoldKey(
+            generation: textView.textGeneration,
+            language: state.languageIdentifier,
+            userFolds: state.userFoldedBodyRanges
+        )
+        guard key != foldCacheKey else { return }
         var regions = FoldDiscovery.allFoldableHeaders(
             in: textView.text as NSString,
             language: state.languageIdentifier
         )
-        // Fold Selection isn't in language discovery; synthesize
-        // a FoldableRegion so the engine paints its chevron.
-        for body in state.userFoldedBodyRanges {
+        // Manual folds also need a gutter control.
+        var occupiedHeaders = Set(regions.map(\.headerRow))
+        for body in key.userFolds {
             let header = max(0, body.lowerBound - 1)
-            if regions.contains(where: { $0.headerRow == header }) { continue }
+            guard occupiedHeaders.insert(header).inserted else { continue }
             regions.append(EditorEngine.TextView.FoldableRegion(
                 headerRow: header,
                 bodyRange: body
@@ -248,7 +232,6 @@ final class EditorTextViewCoordinator: NSObject, @preconcurrency EditorEngine.Te
             }
         }
 
-        // 3. List continuation interceptor.
         guard text == "\n",
               UserDefaults.standard.bool(forKey: AppPreferenceKey.autoContinueLists)
         else { return true }

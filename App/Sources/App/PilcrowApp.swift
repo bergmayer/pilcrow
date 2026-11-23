@@ -92,9 +92,6 @@ private struct WindowOpenerInstaller: View {
                         openWindow(id: id.rawValue)
                     }
                 }
-                AppStateBus.shared.scenes.openPreviewWindow = { tabID in
-                    openWindow(id: SceneID.markdownPreview.rawValue, value: tabID)
-                }
                 AppStateBus.shared.scenes.openEditorWindow = { route in
                     openWindow(id: SceneID.editor.rawValue, value: route)
                 }

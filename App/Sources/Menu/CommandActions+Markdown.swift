@@ -92,16 +92,9 @@ extension CommandActions {
         presentSheet(.markdownTable)
     }
 
-    /// iPad gets a real scene (Stage Manager-friendly, side-by-side
-    /// with the editor). iPhone is single-window so it gets a sheet
-    /// — opening a new scene there would silently no-op.
     static func presentMarkdownPreview() {
-        if DeviceIdiom.supportsMultipleWindows {
-            guard let tab = Self.context.scenes.currentSession?.activeTab else { return }
-            Self.context.scenes.openPreviewWindow?(tab.id)
-        } else {
-            presentSheet(.markdownPreview)
-        }
+        let owner = session?.activeTab.state ?? state
+        owner?.previewOpen.toggle()
     }
 
     /// No-op when the slot is empty or out of range. Script errors

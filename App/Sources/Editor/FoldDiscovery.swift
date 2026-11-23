@@ -28,109 +28,92 @@ enum FoldDiscovery {
         }
     }
 
-    /// Find every fold-opening line in the buffer (for Fold All).
-    ///
-    /// **O(N) single-pass implementation.** The naive version walked the
-    /// buffer N times (once per call to `lineStart`/`atxHeadingLevel`),
-    /// which was O(N³) on a markdown file — a 634 KB doc with 5 K lines
-    /// was *trillions* of operations and froze main thread permanently.
-    /// This version walks the buffer once, recording header rows + levels
-    /// as it goes, then does a second O(H) pass to pair each header
-    /// with its body range.
+    /// Finds fold bodies in document order.
     static func allFoldableHeaders(
         in text: NSString,
         language: LanguageIdentifier
     ) -> [EditorEngine.TextView.FoldableRegion] {
         switch language {
         case .markdown: return markdownFoldableHeaders(in: text)
-        default:        return indentFoldableHeaders(in: text)
+        default: return indentFoldableHeaders(in: text)
         }
     }
-
-    // MARK: - Markdown (O(N))
 
     private static func markdownFoldableHeaders(in text: NSString) -> [EditorEngine.TextView.FoldableRegion] {
         let headers = OutlineBuilder.build(in: text)
-        let totalRows = lineCount(in: text)
+        let lastRow = TextMetrics.lineCount(in: text) - 1
+        var boundaries: [Int] = []
+        var regions: [EditorEngine.TextView.FoldableRegion] = []
 
-        // Pair each header with its body end: the row before the next
-        // header whose level is ≤ this header's, or the last row.
-        var out: [EditorEngine.TextView.FoldableRegion] = []
-        for (idx, header) in headers.enumerated() {
-            var endRow = totalRows - 1
-            for next in headers[(idx + 1)...] where next.level <= header.level {
-                endRow = next.row - 1
-                break
+        for index in headers.indices.reversed() {
+            let header = headers[index]
+            while let next = boundaries.last, headers[next].level > header.level {
+                boundaries.removeLast()
             }
-            guard endRow > header.row else { continue }
-            out.append(.init(headerRow: header.row, bodyRange: (header.row + 1)...endRow))
+            let end = boundaries.last.map { headers[$0].row - 1 } ?? lastRow
+            if end > header.row {
+                regions.append(.init(headerRow: header.row, bodyRange: (header.row + 1)...end))
+            }
+            boundaries.append(index)
         }
-        return out
+        return regions.reversed()
     }
 
-    // MARK: - Indent (O(N))
+    private struct IndentedLine {
+        let indent: Int
+        let isBlank: Bool
+    }
+
+    private static func indentedLines(in text: NSString) -> [IndentedLine] {
+        var lines: [IndentedLine] = []
+        var indent = 0
+        var isBlank = true
+        var offset = 0
+        let length = text.length
+        while offset < length {
+            let character = text.character(at: offset)
+            offset += 1
+            switch character {
+            case 0x0A, 0x0D:
+                lines.append(IndentedLine(indent: indent, isBlank: isBlank))
+                indent = 0
+                isBlank = true
+                if character == 0x0D, offset < length, text.character(at: offset) == 0x0A {
+                    offset += 1
+                }
+            case 0x20:
+                if isBlank { indent += 1 }
+            case 0x09:
+                if isBlank { indent += 8 }
+            default:
+                isBlank = false
+            }
+        }
+        lines.append(IndentedLine(indent: indent, isBlank: isBlank))
+        return lines
+    }
 
     private static func indentFoldableHeaders(in text: NSString) -> [EditorEngine.TextView.FoldableRegion] {
-        let length = text.length
-        guard length > 0 else { return [] }
-        // Single pass collects (row, indent, isBlank) for every line.
-        struct LineInfo { let row: Int; let indent: Int; let isBlank: Bool }
-        var lines: [LineInfo] = []
-        var row = 0
-        var indent = 0
-        var sawNonWhitespace = false
-        var atLineStart = true
-        var i = 0
-        func closeLine() {
-            lines.append(LineInfo(row: row, indent: indent, isBlank: !sawNonWhitespace))
-        }
-        while i < length {
-            if atLineStart {
-                indent = 0
-                sawNonWhitespace = false
-                atLineStart = false
-            }
-            let c = text.character(at: i)
-            switch c {
-            case 0x20: if !sawNonWhitespace { indent += 1 }
-            case 0x09: if !sawNonWhitespace { indent += 8 }
-            case 0x0A:
-                closeLine()
-                row += 1; atLineStart = true; i += 1
-                continue
-            case 0x0D:
-                closeLine()
-                row += 1; atLineStart = true; i += 1
-                if i < length, text.character(at: i) == 0x0A { i += 1 }
-                continue
-            default: sawNonWhitespace = true
-            }
-            i += 1
-        }
-        closeLine()  // final line (no trailing newline)
+        let lines = indentedLines(in: text)
+        let rows = lines.indices.filter { !lines[$0].isBlank }
+        var boundaries: [Int] = []
+        var regions: [EditorEngine.TextView.FoldableRegion] = []
 
-        // For each non-blank line, fold body = run of subsequent
-        // non-blank lines with greater indent.
-        var out: [EditorEngine.TextView.FoldableRegion] = []
-        for (idx, line) in lines.enumerated() where !line.isBlank {
-            var bodyStart = -1
-            var bodyEnd = -1
-            for j in (idx + 1)..<lines.count {
-                let candidate = lines[j]
-                if candidate.isBlank {
-                    if bodyStart >= 0 { continue } else { continue }
-                }
-                if candidate.indent <= line.indent { break }
-                if bodyStart < 0 { bodyStart = j }
-                bodyEnd = j
+        // The closest following line at equal or lower indent ends the fold.
+        // Each nonblank line is pushed once and removed at most once.
+        for index in rows.indices.reversed() {
+            let row = rows[index]
+            while let next = boundaries.last, lines[rows[next]].indent > lines[row].indent {
+                boundaries.removeLast()
             }
-            guard bodyStart >= 0, bodyEnd >= bodyStart else { continue }
-            out.append(.init(headerRow: line.row, bodyRange: lines[bodyStart].row...lines[bodyEnd].row))
+            let end = (boundaries.last ?? rows.endIndex) - 1
+            if end > index {
+                regions.append(.init(headerRow: row, bodyRange: rows[index + 1]...rows[end]))
+            }
+            boundaries.append(index)
         }
-        return out
+        return regions.reversed()
     }
-
-    // MARK: - Markdown
 
     private static func markdownBodyRange(
         forHeaderRow header: Int,
@@ -139,92 +122,19 @@ enum FoldDiscovery {
         markdownFoldableHeaders(in: text).first { $0.headerRow == header }?.bodyRange
     }
 
-    // MARK: - Indent-based
-
     private static func indentBodyRange(
         forHeaderRow header: Int,
         in text: NSString
     ) -> ClosedRange<Int>? {
-        let total = lineCount(in: text)
-        guard header < total - 1 else { return nil }
-        let headerIndent = indentLevel(row: header, in: text)
-        var probe = header + 1
-        while probe < total, isBlankLine(row: probe, in: text) { probe += 1 }
-        guard probe < total else { return nil }
-        let bodyIndent = indentLevel(row: probe, in: text)
-        guard bodyIndent > headerIndent else { return nil }
-        var lastBody = probe
-        var row = probe + 1
-        while row < total {
-            if isBlankLine(row: row, in: text) {
-                row += 1
-                continue
-            }
-            let indent = indentLevel(row: row, in: text)
-            if indent <= headerIndent { break }
-            lastBody = row
-            row += 1
+        let lines = indentedLines(in: text)
+        guard lines.indices.contains(header) else { return nil }
+        var first: Int?
+        var last = header
+        for row in (header + 1)..<lines.count where !lines[row].isBlank {
+            guard lines[row].indent > lines[header].indent else { break }
+            if first == nil { first = row }
+            last = row
         }
-        return probe...lastBody
-    }
-
-    // MARK: - Shared helpers
-
-    private static func indentLevel(row: Int, in text: NSString) -> Int {
-        guard let start = lineStart(row: row, in: text) else { return 0 }
-        let length = text.length
-        var i = start
-        var indent = 0
-        while i < length {
-            let c = text.character(at: i)
-            if c == 0x20 { indent += 1; i += 1 }
-            else if c == 0x09 { indent += 8; i += 1 }
-            else { break }
-        }
-        return indent
-    }
-
-    private static func isBlankLine(row: Int, in text: NSString) -> Bool {
-        guard let start = lineStart(row: row, in: text) else { return true }
-        let length = text.length
-        var i = start
-        while i < length {
-            let c = text.character(at: i)
-            if c == 0x0A || c == 0x0D { return true }
-            if c != 0x20 && c != 0x09 { return false }
-            i += 1
-        }
-        return true
-    }
-
-    /// Returns the utf16 location where `row` begins, or nil for an
-    /// out-of-range row.
-    private static func lineStart(row: Int, in text: NSString) -> Int? {
-        let length = text.length
-        guard row >= 0 else { return nil }
-        if row == 0 { return 0 }
-        var i = 0
-        var currentRow = 0
-        while i < length {
-            let c = text.character(at: i)
-            if c == 0x0A {
-                currentRow += 1
-                i += 1
-            } else if c == 0x0D {
-                currentRow += 1
-                i += 1
-                if i < length, text.character(at: i) == 0x0A { i += 1 }
-            } else {
-                i += 1
-                continue
-            }
-            if currentRow == row { return i }
-        }
-        return nil
-    }
-
-    private static func lineCount(in text: NSString) -> Int {
-        TextMetrics.lineCount(in: text)
+        return first.map { $0...last }
     }
 }
-

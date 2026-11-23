@@ -40,6 +40,7 @@ final class PlainTextDocument {
     private let scratchWriter = ScratchWriter()
     private var scratchGeneration: UInt64 = 0
     private var recoveryGeneration: UInt64 = 0
+    private var pendingRecoveryWrite: (id: UUID, task: Task<Bool, any Error>)?
     private var revisionTask: Task<Void, Never>?
 
     /// Stays visible in this document until recovery succeeds or the
@@ -51,9 +52,10 @@ final class PlainTextDocument {
     /// Raw bytes from the last load — kept so the encoding picker can
     /// re-decode with a different encoding without re-reading disk.
     var originalData: Data?
-    var isLoading: Bool = false
+    private(set) var loadTask: Task<Void, Never>?
+    private(set) var loadGeneration: UInt64 = 0
+    var isLoading: Bool { loadTask != nil }
     var isSaving: Bool = false
-    private var loadGeneration: UInt64 = 0
 
     /// Device-local recovery snapshot URL. Set on the first committed
     /// autosave of a dirty doc; cleared on Save-As / Discard.
@@ -99,11 +101,8 @@ final class PlainTextDocument {
         return untitledNumber == 1 ? "Untitled" : "Untitled \(untitledNumber)"
     }
 
-    /// Disk state at the moment we last read from / wrote to the
-    /// source file. The stale-source safeguard compares these to
-    /// the current on-disk attrs before adopting a draft or ⌘S'ing
-    /// — if either differs (or the file's gone), the user sees a
-    /// missing / changed dialog before any bytes commit.
+    /// Source attributes used to detect changes when restoring recovery.
+    /// Explicit saves compare the original bytes inside file coordination.
     var sourceMtimeAtLoad: Date?
     var sourceSizeAtLoad: Int?
 
@@ -143,25 +142,30 @@ final class PlainTextDocument {
         }
     }
 
-    /// Read and decode away from the main actor; only the current load
-    /// may publish its completed payload into the document.
-    func loadAsync(from url: URL) async throws {
-        loadGeneration &+= 1
+    /// Owns loading for opens, session restoration, and explicit draft recovery.
+    /// A cancelled or superseded task cannot clear a replacement's handle.
+    @discardableResult
+    func startLoad(
+        onFinish: (@MainActor () -> Void)? = nil,
+        _ operation: @escaping @MainActor (UInt64) async -> Void
+    ) -> Task<Void, Never> {
+        invalidateLoad()
         let generation = loadGeneration
-        isLoading = true
-        defer {
-            if loadGeneration == generation {
-                isLoading = false
+        let task = Task { @MainActor [weak self] in
+            await operation(generation)
+            if let self, self.loadGeneration == generation {
+                self.loadTask = nil
+                onFinish?()
             }
         }
-        let payload = try await Self.readPayload(from: url)
-        // Yield so SwiftUI can paint the loading overlay before the
-        // text-assignment pass kicks the engine.
-        await Task.yield()
-        try await Task.sleep(for: Timing.loadOverlayHandoff)
-        try Task.checkCancellation()
-        guard loadGeneration == generation else { throw CancellationError() }
-        applyPayload(payload, url: url)
+        loadTask = task
+        return task
+    }
+
+    func invalidateLoad() {
+        loadGeneration &+= 1
+        loadTask?.cancel()
+        loadTask = nil
     }
 
     func applyPayload(_ payload: LoadPayload, url: URL) {
@@ -178,9 +182,7 @@ final class PlainTextDocument {
         // devices.
         self.sourceMtimeAtLoad = payload.modificationDate
         self.sourceSizeAtLoad = payload.data.count
-        // URL-derived key — reopening the same file finds its
-        // revision history. Anything captured under the prior
-        // untitled-UUID key is orphaned (acceptable tradeoff).
+        // Reopening a source uses its existing revision history.
         self.revisionKey = RevisionStore.key(for: sourceURL)
         // Seed an "original on open" revision once per URL so a
         // later Revert-to-Original has an anchor. Best-effort — a
@@ -293,10 +295,12 @@ final class PlainTextDocument {
 
         if isDirty {
             autoSave()
+            let generation = recoveryGeneration
+            let write = scheduleRecoveryWrite()
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.writeRecoverySnapshot()
+                    try await self.refreshScratch(after: write, generation: generation)
                 } catch {
                     AppStateBus.shared.presentation.openErrorMessage =
                         "Couldn't update the recovery draft for \(self.displayName): \(error.localizedDescription)"
@@ -305,11 +309,7 @@ final class PlainTextDocument {
         }
     }
 
-    /// Mac-style recovery with checkout semantics:
-    ///
-    /// Never touches `fileURL` either way — ⌘S is the only path
-    /// that writes back to the source. Off-main so the encode +
-    /// write don't freeze the typing loop.
+    /// Writes an exact UTF-8 scratch copy without changing the source file.
     @discardableResult
     func autoSave() -> Task<Void, Never> {
         let snapshot = text
@@ -345,44 +345,52 @@ final class PlainTextDocument {
         return task
     }
 
-    /// Commit the live buffer before a lifecycle transition. This is private
-    /// restoration data; source files are changed only by an explicit Save.
-    @discardableResult
-    func writeRecoverySnapshot() async throws -> Bool {
-        recoveryGeneration &+= 1
+    /// Serializes checkpoints for this buffer. Discard invalidates queued
+    /// writes. Any later write waits for an in-flight write to clean up.
+    func scheduleRecoveryWrite() -> Task<Bool, any Error> {
         let generation = recoveryGeneration
-        if !text.isEmpty || (fileURL != nil && isDirty) {
-            let metadata = makeDraftMetadata()
+        let writeID = UUID()
+        let previous = pendingRecoveryWrite?.task
+        let snapshot = text
+        let shouldWrite = !snapshot.isEmpty || (fileURL != nil && isDirty)
+        let metadata = shouldWrite ? makeDraftMetadata() : nil
+        let write = Task { @MainActor in
+            defer {
+                if pendingRecoveryWrite?.id == writeID {
+                    pendingRecoveryWrite = nil
+                }
+            }
+            _ = await previous?.result
+            guard generation == recoveryGeneration else { return false }
+            if !shouldWrite {
+                DraftsStore.shared.discard(draftURL)
+                draftURL = nil
+                return true
+            }
             let savedURL = try await DraftsStore.shared.save(
-                text: text,
-                existing: draftURL,
-                metadata: metadata
+                text: snapshot, existing: draftURL, metadata: metadata
             )
             guard generation == recoveryGeneration else {
-                // A newer Save/Discard superseded this write while its I/O
-                // was off-main. Remove only an unowned result; a newer write
-                // may intentionally be reusing the same recovery URL.
-                if draftURL?.standardizedFileURL != savedURL.standardizedFileURL {
-                    DraftsStore.shared.discard(savedURL)
-                }
+                DraftsStore.shared.discard(savedURL)
                 return false
             }
             draftURL = savedURL
-        } else if let stale = draftURL {
-            // User cleared the buffer before close — drop the draft
-            // so it doesn't resurface as an empty entry in the
-            // launcher.
-            DraftsStore.shared.discard(stale)
-            draftURL = nil
+            return true
         }
-        return true
+        pendingRecoveryWrite = (writeID, write)
+        return write
     }
 
-    /// Commits recovery before lifecycle bookkeeping, then refreshes the
-    /// crash shadow with the resulting draft
-    /// filename. Callers can await this without blocking the main actor.
+    /// Commits recovery before lifecycle bookkeeping and refreshes its scratch reference.
     func commitRecoverySnapshot() async throws {
-        guard try await writeRecoverySnapshot(), isDirty else { return }
+        try Task.checkCancellation()
+        let generation = recoveryGeneration
+        try await refreshScratch(after: scheduleRecoveryWrite(), generation: generation)
+    }
+
+    private func refreshScratch(after write: Task<Bool, any Error>, generation: UInt64) async throws {
+        let result = await write.result
+        guard generation == recoveryGeneration, try result.get(), isDirty else { return }
         autoSave()
     }
 
@@ -477,8 +485,7 @@ final class PlainTextDocument {
         nonisolated func prepare(_ source: String) throws -> (text: String, data: Data) {
             let text = PlainTextDocument.prepareTextForSaving(source, lineEnding: lineEnding,
                 trimTrailingWhitespace: trimTrailingWhitespace, ensureTrailingNewline: ensureTrailingNewline)
-            let data = try PlainTextDocument.encode(text: text, encoding: encoding, lineEnding: lineEnding,
-                trimTrailingWhitespace: false, ensureTrailingNewline: false, saveUTF8BOMPref: saveUTF8BOM)
+            let data = try PlainTextDocument.encodePreparedText(text, encoding: encoding, saveUTF8BOM: saveUTF8BOM)
             return (text, data)
         }
     }
@@ -508,12 +515,6 @@ final class PlainTextDocument {
         return output
     }
 
-    /// Pure encode — no instance state, no main-actor dependency.
-    /// Callable from a detached background task so a multi-MB
-    /// `replacingLineEndings(with:)` doesn't run on the main thread
-    /// during autosave (the trim + line-ending normalisation + UTF-8
-    /// conversion on a 1 MB buffer is ~50-200 ms of pure-Swift work
-    /// that froze typing on McCartney-sized files).
     nonisolated static func encode(
         text: String,
         encoding: FileEncoding,
@@ -528,15 +529,20 @@ final class PlainTextDocument {
             trimTrailingWhitespace: trimTrailingWhitespace,
             ensureTrailingNewline: ensureTrailingNewline
         )
+        return try encodePreparedText(output, encoding: encoding, saveUTF8BOM: saveUTF8BOMPref)
+    }
+
+    nonisolated private static func encodePreparedText(
+        _ text: String, encoding: FileEncoding, saveUTF8BOM: Bool
+    ) throws -> Data {
         let rawEncoding = encoding.encoding
-        guard var data = output.data(using: rawEncoding, allowLossyConversion: false) else {
+        guard var data = text.data(using: rawEncoding, allowLossyConversion: false) else {
             throw CocoaError(
                 .fileWriteInapplicableStringEncoding,
                 userInfo: [NSStringEncodingErrorKey: rawEncoding.rawValue]
             )
         }
-        let bomForDocument = encoding.withUTF8BOM
-        if rawEncoding == .utf8, (bomForDocument || saveUTF8BOMPref) {
+        if rawEncoding == .utf8, encoding.withUTF8BOM || saveUTF8BOM {
             var prefixed = Data([0xEF, 0xBB, 0xBF])
             prefixed.append(data)
             data = prefixed

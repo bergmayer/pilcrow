@@ -43,7 +43,7 @@ struct EditorView: View {
                 if let override = tabContentOverride {
                     override
                 } else {
-                    splitOrSingleEditor
+                    editorWithPreview
                 }
             }
             .frame(maxHeight: .infinity)
@@ -60,6 +60,15 @@ struct EditorView: View {
         )) {
             InfoInspectorSheet(document: document, state: state, onJump: { goToLine($0) })
                 .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
+        }
+        .popover(isPresented: Binding(
+            get: { DeviceIdiom.isPhone && state.previewOpen },
+            set: { state.previewOpen = $0 }
+        ), attachmentAnchor: .point(.topTrailing), arrowEdge: .top) {
+            MarkdownPreviewContent(document: document, embedded: true,
+                                   onDone: { state.previewOpen = false })
+                .frame(idealWidth: 340, idealHeight: 520)
+                .presentationCompactAdaptation(.popover)
         }
         // Blocks typing into a buffer that's about to be replaced.
         .overlay {
@@ -349,7 +358,7 @@ struct EditorView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 Button("Cancel") {
-                    state.loadTask?.cancel()
+                    document.loadTask?.cancel()
                 }
                 .buttonStyle(.bordered)
             }
@@ -370,6 +379,22 @@ struct EditorView: View {
             return "Loading \(name)…"
         }
         return "Loading \(name)\nfrom \(provider)…"
+    }
+
+    private var editorWithPreview: some View {
+        GeometryReader { proxy in
+            let sideBySide = proxy.size.width >= 700
+            let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+            layout {
+                splitOrSingleEditor
+                if state.previewOpen && !DeviceIdiom.isPhone {
+                    Divider()
+                    MarkdownPreviewContent(document: document, embedded: true,
+                                           onDone: { state.previewOpen = false })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
     }
 
     /// Keep both mounted panes stable through split toggles and rotation.
@@ -642,8 +667,6 @@ struct EditorView: View {
             CharacterPanelSheet()
         case .markdownTable:
             MarkdownTableSheet()
-        case .markdownPreview:
-            MarkdownPreviewSheet(document: document)
         case .organizeFootnotes:
             OrganizeFootnotesSheet()
         case .spellCheck:

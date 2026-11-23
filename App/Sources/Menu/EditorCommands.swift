@@ -544,6 +544,10 @@ struct EditorCommands: Commands {
 
     @ViewBuilder
     private var viewMenuToggleItems: some View {
+        Button("HTML / Markdown Preview", action: focused(CommandActions.presentMarkdownPreview))
+            .keyboardShortcut(AppShortcut.markdownPreview)
+            .disabled(!isEnabled)
+
         Toggle(isOn: bindingFor(\.showLineNumbers, defaultsKey: AppPreferenceKey.showLineNumbers)) {
             Label("Show Line Numbers", systemImage: "list.number")
         }
@@ -692,9 +696,6 @@ struct EditorCommands: Commands {
             Button("Organize Footnotes…") { presentSheet(.organizeFootnotes) }
             Button("Insert Table…", action: focused(CommandActions.presentMarkdownTable))
                 .keyboardShortcut(AppShortcut.markdownTable)
-            Divider()
-            Button("Preview…", action: focused(CommandActions.presentMarkdownPreview))
-                .keyboardShortcut(AppShortcut.markdownPreview)
         }
     }
 

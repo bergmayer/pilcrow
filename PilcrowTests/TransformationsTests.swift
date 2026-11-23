@@ -3,6 +3,24 @@ import XCTest
 
 final class TransformationsTests: XCTestCase {
 
+    func test_previewAutomaticallyUsesHTMLFileExtension() {
+        let source = "<h1>Hello</h1>"
+        for ext in ["html", "HTM", "xhtml"] {
+            XCTAssertEqual(PreviewFormat.automatic.html(for: source, title: "Test",
+                url: URL(fileURLWithPath: "/tmp/test.\(ext)")), source)
+        }
+    }
+
+    func test_previewFormatCanOverrideFileExtension() {
+        let url = URL(fileURLWithPath: "/tmp/test.html")
+        XCTAssertEqual(PreviewFormat.markdown.html(for: "# Hello", title: "Test", url: url),
+                       MarkdownRenderer.html(for: "# Hello", title: "Test"))
+        XCTAssertEqual(PreviewFormat.html.html(for: "<p>Hello</p>", title: "Test", url: nil),
+                       "<p>Hello</p>")
+        XCTAssertEqual(PreviewFormat.automatic.html(for: "# Hello", title: "Test", url: nil),
+                       MarkdownRenderer.html(for: "# Hello", title: "Test"))
+    }
+
     // MARK: - Case
 
     func test_titleCase_capitalizesMajorWordsAndLowercasesShortFunctionWords() {

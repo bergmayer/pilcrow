@@ -3,11 +3,7 @@ import UIKit
 import EditorEngine
 import PilcrowSyntax
 
-/// The engine's `TextView` is the buffer's source of truth. The
-/// coordinator bumps `document.bufferRevision` per keystroke;
-/// status bar / preview read a debounced snapshot. Earlier
-/// designs piped full text through `Binding<String>` and froze
-/// editing on multi-MB files.
+/// Bridges the native editing buffer to SwiftUI, which observes debounced snapshots.
 struct EditorTextView: UIViewRepresentable {
 
     let document: PlainTextDocument
@@ -86,11 +82,6 @@ struct EditorTextView: UIViewRepresentable {
         textView.addSubview(history)
         context.coordinator.changeHistoryOverlay = history
 
-        // Fold-selection markers synthesize a `FoldableRegion` per
-        // `userFoldedBodyRanges` entry so the engine paints its own
-        // gutter chevron (sibling overlays got buried under
-        // `bringSubviewToFront(gutterContainerView)`).
-
         if let sibling = state.siblingState?.textView {
             textView.shareUndoHistory(with: sibling)
         }
@@ -104,7 +95,6 @@ struct EditorTextView: UIViewRepresentable {
     static func dismantleUIView(_ textView: PilcrowTextView, coordinator: EditorTextViewCoordinator) {
         coordinator.state.viewport = EditorViewport(state: coordinator.state)
         coordinator.flushBufferSnapshot(from: textView)
-        coordinator.overlayRefreshTask?.cancel()
         textView.editorDelegate = nil
         if coordinator.state.textView === textView {
             coordinator.state.textView = nil
@@ -128,7 +118,13 @@ struct EditorTextView: UIViewRepresentable {
         context.coordinator.refreshFoldableRegions(textView)
         applyFocusRequestIfNeeded(to: textView, context: context)
         context.coordinator.bookmarkOverlay?.bookmarks = state.bookmarks
-        refreshChangeHistoryOverlay(for: textView, coordinator: context.coordinator)
+        if let overlay = context.coordinator.changeHistoryOverlay {
+            if state.showChangeHistoryGutter, !state.isLargeFile {
+                overlay.update(baseline: state.savedBaselineText, current: document.text)
+            } else {
+                overlay.clear()
+            }
+        }
     }
 
     /// Only pushes external document writes (load, Revert, restore, or a
@@ -177,62 +173,6 @@ struct EditorTextView: UIViewRepresentable {
             identifier: state.languageIdentifier,
             coordinator: coordinator
         )
-    }
-
-    private func refreshChangeHistoryOverlay(
-        for textView: PilcrowTextView,
-        coordinator: EditorTextViewCoordinator
-    ) {
-        guard let overlay = coordinator.changeHistoryOverlay else { return }
-        guard let currentText = changeHistoryText(from: textView) else {
-            clearChangeHistoryOverlay(overlay, coordinator: coordinator)
-            return
-        }
-
-        let baselineText = state.savedBaselineText
-        guard coordinator.changeHistoryBaselineCache != baselineText
-                || coordinator.changeHistoryCurrentCache != currentText
-        else { return }
-
-        coordinator.overlayRefreshTask?.cancel()
-        coordinator.overlayRefreshTask = Task { @MainActor [weak coordinator, weak overlay] in
-            try? await Task.sleep(for: Timing.changeHistoryOverlayDebounce)
-            if Task.isCancelled { return }
-            guard let coordinator, let overlay else { return }
-            if coordinator.changeHistoryBaselineCache != baselineText {
-                coordinator.changeHistoryBaselineCache = baselineText
-                overlay.baseline = baselineText.components(separatedBy: "\n")
-            }
-            if coordinator.changeHistoryCurrentCache != currentText {
-                coordinator.changeHistoryCurrentCache = currentText
-                overlay.current = currentText.components(separatedBy: "\n")
-            }
-        }
-    }
-
-    private func changeHistoryText(from textView: PilcrowTextView) -> String? {
-        // Gutter gated on pref + byte ceiling
-        // (`changeHistoryGutterByteLimit` — per-line diff +
-        // caretRect lookups slow past 100KB) + cache short-circuit.
-        // Pref / large-file checks run BEFORE touching `textView.text`
-        // — the getter is an O(n) buffer copy per render.
-        guard state.showChangeHistoryGutter, !state.isLargeFile else { return nil }
-        let candidate = textView.text
-        guard candidate.utf16.count <= Timing.changeHistoryGutterByteLimit else { return nil }
-        return candidate
-    }
-
-    private func clearChangeHistoryOverlay(
-        _ overlay: ChangeHistoryGutterOverlay,
-        coordinator: EditorTextViewCoordinator
-    ) {
-        // Drop stale bars; resetting caches lets a re-enable render fresh.
-        coordinator.overlayRefreshTask?.cancel()
-        guard !overlay.baseline.isEmpty || !overlay.current.isEmpty else { return }
-        overlay.baseline = []
-        overlay.current = []
-        coordinator.changeHistoryBaselineCache = nil
-        coordinator.changeHistoryCurrentCache = nil
     }
 
     func makeCoordinator() -> EditorTextViewCoordinator {

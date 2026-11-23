@@ -1,19 +1,41 @@
 import UIKit
 import EditorEngine
 
-/// VS Code-style change bars on the inside edge of the line-number
-/// gutter — green = added line, yellow = modified, red wedge =
-/// deletion. Cheap parallel walk over baseline + current `[String]`;
-/// could move to `CollectionDifference` if needed for huge files.
+/// Compares current and saved lines by row to draw change markers.
 final class ChangeHistoryGutterOverlay: UIView {
 
     weak var host: EditorEngine.TextView?
 
-    var baseline: [String] = [] {
-        didSet { if baseline != oldValue { setNeedsLayout() } }
+    private var baselineText: String?
+    private var currentText: String?
+    private var baseline: [String] = []
+    private var current: [String] = []
+
+    func update(baseline saved: String, current text: String) {
+        guard baselineText != saved || currentText != text else { return }
+        guard text.utf16.count <= Timing.changeHistoryGutterLengthLimit,
+              saved.utf16.count <= Timing.changeHistoryGutterLengthLimit else {
+            clear()
+            return
+        }
+        if baselineText != saved {
+            baselineText = saved
+            baseline = TextMetrics.lines(in: saved)
+        }
+        if currentText != text {
+            currentText = text
+            current = TextMetrics.lines(in: text)
+        }
+        setNeedsLayout()
     }
-    var current: [String] = [] {
-        didSet { if current != oldValue { setNeedsLayout() } }
+
+    func clear() {
+        guard currentText != nil else { return }
+        baselineText = nil
+        currentText = nil
+        baseline = []
+        current = []
+        setNeedsLayout()
     }
 
     private static let stripWidth: CGFloat = 4
@@ -83,24 +105,8 @@ final class ChangeHistoryGutterOverlay: UIView {
     }
 
     private func addBar(forLine line: Int, kind: BarKind, host: EditorEngine.TextView) {
-        // Linear scan to find the line start. The engine's
-        // contentSize-driven layout already throttles us so the cost
-        // stays bounded.
-        let nsText = host.text as NSString
-        var scan = 0
-        var current = 0
-        var lineStart = 0
-        while scan < nsText.length {
-            let lr = nsText.lineRange(for: NSRange(location: scan, length: 0))
-            if current == line {
-                lineStart = lr.location
-                break
-            }
-            scan = lr.location + lr.length
-            current += 1
-        }
-        let rect = host.caretRect(atCharacterIndex: lineStart)
-        guard rect.height > 0, rect.height.isFinite, rect.minY.isFinite else { return }
+        guard let rect = host.caretRect(atLine: line),
+              rect.height > 0, rect.height.isFinite, rect.minY.isFinite else { return }
         let bar = UIView(frame: CGRect(x: 0, y: rect.minY, width: bounds.width, height: rect.height))
         bar.backgroundColor = kind.color
         bar.layer.cornerRadius = bounds.width / 2

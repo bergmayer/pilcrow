@@ -22,12 +22,6 @@ enum AppPreferenceKey {
     static let showPageGuide          = "showPageGuide"
     static let pageGuideColumn        = "pageGuideColumn"
     static let showStatusBar          = "showStatusBar"
-    /// Per-line green/yellow/red bars in the gutter showing what's
-    /// changed since load/save. Off by default — the per-line diff
-    /// is fast on small files but the engine's `caretRect` lookups
-    /// + bar layout grow O(n) with line count, so it's gated on a
-    /// hard byte ceiling (`changeHistoryGutterByteLimit`) on top of
-    /// the per-window preference.
     static let showChangeHistoryGutter = "showChangeHistoryGutter"
     /// Extra scrollable space below the last line, sized as ten
     /// lines of the current font/line height. On by default — keeps

@@ -147,16 +147,17 @@ extension CommandActions {
               let url = tab.document.fileURL else { return }
         let presentation = Self.context.presentation
         presentation.sourceStaleCheck = nil
-        let generation = tab.state.loadGeneration
+        let generation = tab.document.loadGeneration
         Task { @MainActor in
             do {
                 let payload = try await PlainTextDocument.readPayload(from: url)
-                guard tab.state.loadGeneration == generation, tab.document.fileURL == url else { return }
+                guard tab.document.loadGeneration == generation, tab.document.fileURL == url else { return }
                 tab.document.originalData = payload.data
                 tab.document.sourceMtimeAtLoad = payload.modificationDate
                 tab.document.sourceSizeAtLoad = payload.data.count
                 tab.state.requestEditorFocus()
             } catch {
+                guard tab.document.loadGeneration == generation, tab.document.fileURL == url else { return }
                 presentation.openErrorMessage = "Couldn't read the current source: " + error.localizedDescription
             }
         }
@@ -209,23 +210,21 @@ extension CommandActions {
     static func recoverDraft(_ draft: DraftRecord, in session: EditorSession) {
         guard Self.context.scenes.allOpenSessions.contains(where: { $0 === session }) else { return }
         let tab = session.newTab(kind: .editor)
-        tab.document.isLoading = true
-        tab.state.loadTask = Task { @MainActor [weak session, weak tab] in
+        tab.document.startLoad(onFinish: { [weak session] in
+            session?.persistRestorationRecord()
+        }) { [weak session, weak tab] generation in
             guard let session, let tab else { return }
-            defer {
-                tab.document.isLoading = false
-                tab.state.loadTask = nil
-                session.persistRestorationRecord()
-            }
             do {
                 if let staleCheck = try await DraftRecoveryWorkflow.adopt(draft, into: tab) {
                     context.presentation.sourceStaleCheck = staleCheck
                 }
-            } catch is CancellationError {
-                session.closeTab(tab.id, disposition: .discard)
             } catch {
+                guard tab.document.loadGeneration == generation else { return }
                 session.closeTab(tab.id, disposition: .discard)
-                context.presentation.openErrorMessage = error.localizedDescription
+                session.persistRestorationRecord()
+                if !Task.isCancelled, !(error is CancellationError) {
+                    context.presentation.openErrorMessage = error.localizedDescription
+                }
             }
         }
     }

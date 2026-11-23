@@ -7,6 +7,12 @@ import EditorEngine
 /// avoids `String.Index` round-trips on hot paths.
 enum TextMetrics {
 
+    static func lines(in text: String) -> [String] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: {
+            $0 == "\n" || $0 == "\r" || $0 == "\r\n"
+        }).map(String.init)
+    }
+
     /// 1-based (line, column) for a utf16 offset. Stops counting at the
     /// cursor, so cost is linear in `offset`, not in document length.
     static func lineColumn(for utf16Offset: Int, in text: NSString) -> (line: Int, column: Int) {
@@ -281,11 +287,11 @@ enum DocumentWorkflow {
         guard !document.isSaving else { throw PlainTextDocument.DocumentError.saveInProgress }
         document.isSaving = true
         defer { document.isSaving = false }
-        let generation = tab.state.loadGeneration
+        let generation = document.loadGeneration
         let originalURL = document.fileURL
         let input = tab.state.textView?.text ?? document.text
         let saved = try await document.writeSnapshot(to: destination, text: input, overwrite: overwrite)
-        guard tab.state.loadGeneration == generation, document.fileURL == originalURL else {
+        guard document.loadGeneration == generation, document.fileURL == originalURL else {
             throw CancellationError()
         }
         adoptSavedSnapshot(saved, into: tab)
@@ -377,27 +383,19 @@ enum DocumentWorkflow {
         goToLine: Int? = nil,
         completion: (@MainActor (Result<Void, any Error>) -> Void)? = nil
     ) {
-        let state = tab.state
         tab.kind = .editor
-        state.loadTask?.cancel()
-        state.loadGeneration &+= 1
-        let generation = state.loadGeneration
-        state.loadTask = Task { @MainActor [weak tab] in
+        tab.document.startLoad { [weak tab] generation in
             guard let tab else { return }
             let state = tab.state
             let document = tab.document
-            defer {
-                if state.loadGeneration == generation {
-                    state.loadTask = nil
-                }
-            }
             do {
-                try await document.loadAsync(from: url)
+                let payload = try await PlainTextDocument.readPayload(from: url)
+                try await Task.sleep(for: Timing.loadOverlayHandoff)
                 try Task.checkCancellation()
+                document.applyPayload(payload, url: url)
             } catch {
-                // Providers may report cancellation as a URL/Cocoa error.
-                // Only the request still owned by this tab may report it.
-                guard !Task.isCancelled, state.loadGeneration == generation else { return }
+                // A file provider can report cancellation as a URL or Cocoa error.
+                guard !Task.isCancelled else { return }
                 AppStateBus.shared.presentation.openErrorMessage =
                     "Couldn't open \(url.lastPathComponent): \(error.localizedDescription)"
                 completion?(.failure(error))
@@ -409,8 +407,8 @@ enum DocumentWorkflow {
             RecentFilesStore.shared.record(loadedURL)
 
             let persisted = FoldPersistence.ranges(for: loadedURL)
-            DispatchQueue.main.async { [weak state] in
-                guard let state, state.loadGeneration == generation else { return }
+            DispatchQueue.main.async { [weak state, weak document] in
+                guard let state, document?.loadGeneration == generation else { return }
                 state.textView?.applyFoldRanges(persisted)
                 if let goToLine { state.textView?.goToLine(goToLine) }
             }

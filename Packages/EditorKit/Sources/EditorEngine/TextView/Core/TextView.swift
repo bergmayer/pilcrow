@@ -15,7 +15,8 @@ open class TextView: UIScrollView {
     public weak var editorDelegate: TextViewDelegate?
     /// Changes whenever the backing string changes. Asynchronous services
     /// use this to discard ranges calculated from an obsolete snapshot.
-    private(set) var textGeneration: UInt64 = 0
+    /// Changes when the buffer is edited or replaced.
+    public private(set) var textGeneration: UInt64 = 0
 
     // MARK: - Accessibility
     //
@@ -942,7 +943,7 @@ open class TextView: UIScrollView {
         case .beginning:
             textInputView.selectedRange = NSRange(location: line.location, length: 0)
         case .end:
-            textInputView.selectedRange = NSRange(location: line.data.length, length: line.data.length)
+            textInputView.selectedRange = NSRange(location: line.location + line.data.length, length: 0)
         case .line:
             textInputView.selectedRange = NSRange(location: line.location, length: line.data.length)
         }
@@ -1241,6 +1242,13 @@ extension TextView {
     /// per-line decorations such as bookmark badges in the gutter.
     public func caretRect(atCharacterIndex location: Int) -> CGRect {
         textInputView.caretRect(at: location)
+    }
+
+    /// Returns the caret rectangle at the start of a zero-based logical line.
+    public func caretRect(atLine row: Int) -> CGRect? {
+        let lines = textInputView.lineManager
+        guard row >= 0, row < lines.lineCount else { return nil }
+        return caretRect(atCharacterIndex: lines.line(atRow: row).location)
     }
 
     /// Returns an array of selection rects corresponding to the range of text.

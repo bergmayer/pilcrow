@@ -5,66 +5,121 @@ import UniformTypeIdentifiers
 /// One preview owns one source document, even when another editor gains focus.
 struct MarkdownPreviewContent: View {
     let document: PlainTextDocument
+    var embedded = false
     var onDone: (() -> Void)?
-    @State private var html = ""
-    @State private var export: HTMLExport?
+    @State private var format: PreviewFormat = .automatic
+    @State private var rendered: RenderedPreview?
     @State private var error: String?
     @State private var reloadID = 0
 
     private struct Source: Equatable, Sendable {
         let text: String
         let title: String
+        let format: PreviewFormat
+        let url: URL?
+    }
+
+    private struct RenderedPreview: Sendable {
+        let export: HTMLExport
+        let baseURL: URL?
     }
 
     private var source: Source {
-        Source(text: document.text, title: document.fileURL?.deletingPathExtension().lastPathComponent ?? document.displayName)
+        Source(
+            text: document.text,
+            title: document.fileURL?.deletingPathExtension().lastPathComponent ?? document.displayName,
+            format: format,
+            url: document.fileURL
+        )
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                if let error {
+        let source = self.source
+        Group {
+            if embedded {
+                VStack(spacing: 0) {
                     HStack {
-                        Text(error).font(.callout)
-                        Button("Reload") { self.error = nil; reloadID += 1 }
+                        Text("Preview").font(.headline)
+                        Spacer()
+                        formatPicker
+                        exportButton
+                        Button { onDone?() } label: { Image(systemName: "xmark") }
+                            .accessibilityLabel("Close Preview")
                     }
-                    .padding()
+                    .padding(10)
+                    Divider()
+                    previewBody
                 }
-                MarkdownWebView(html: html, onFailure: { error = $0 })
-                    .id(reloadID)
-            }
-            .ignoresSafeArea(edges: .bottom)
-            .navigationTitle(source.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                if let onDone {
-                    ToolbarItem(placement: .topBarLeading) { Button("Done", action: onDone).bold() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if let export {
-                        ShareLink(item: export, preview: SharePreview(export.title))
-                    }
+            } else {
+                NavigationStack {
+                    previewBody
+                        .navigationTitle(source.title)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                if let onDone { Button("Done", action: onDone) }
+                            }
+                            ToolbarItem(placement: .topBarTrailing) { formatPicker }
+                            ToolbarItem(placement: .topBarTrailing) { exportButton }
+                        }
                 }
             }
         }
-        .task(id: source) {
-            let captured = source
+        .task(id: source) { await render(source) }
+    }
+
+    @ViewBuilder
+    private var exportButton: some View {
+        if let export = rendered?.export {
+            ShareLink(item: export, preview: SharePreview(export.title))
+        }
+    }
+
+    private var formatPicker: some View {
+        Picker("Preview Format", selection: $format) {
+            ForEach(PreviewFormat.allCases) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.menu)
+    }
+
+    private var previewBody: some View {
+        VStack(spacing: 0) {
+            if let error {
+                HStack {
+                    Text(error).font(.callout)
+                    Button("Reload") {
+                        self.error = nil
+                        reloadID += 1
+                    }
+                }
+                .padding()
+            }
+            MarkdownWebView(html: rendered?.export.html ?? "", baseURL: rendered?.baseURL) { error = $0 }
+                .id(reloadID)
+        }
+    }
+
+    private func render(_ captured: Source) async {
+        do {
+            try await Task.sleep(for: .milliseconds(150))
             let worker = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
-                let rendered = MarkdownRenderer.html(for: captured.text, title: captured.title)
-                try Task.checkCancellation()
-                return HTMLExport(html: rendered, title: captured.title)
+                let html = captured.format.html(for: captured.text, title: captured.title, url: captured.url)
+                return RenderedPreview(
+                    export: HTMLExport(html: html, title: captured.title),
+                    baseURL: captured.url?.deletingLastPathComponent()
+                )
             }
-            do {
-                let rendered = try await withTaskCancellationHandler {
-                    try await worker.value
-                } onCancel: { worker.cancel() }
-                try Task.checkCancellation()
-                html = rendered.html
-                export = rendered
-                error = nil
-            } catch is CancellationError { }
-            catch { self.error = error.localizedDescription }
+            let preview = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
+            guard !Task.isCancelled, source == captured else { return }
+            rendered = preview
+            error = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            self.error = error.localizedDescription
         }
     }
 }
@@ -102,17 +157,9 @@ struct MarkdownPreviewScene: View {
     }
 }
 
-struct MarkdownPreviewSheet: View {
-    let document: PlainTextDocument
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        MarkdownPreviewContent(document: document, onDone: { dismiss() })
-    }
-}
-
 private struct MarkdownWebView: UIViewRepresentable {
     let html: String
+    let baseURL: URL?
     let onFailure: (String) -> Void
 
     func makeUIView(context: Context) -> WKWebView {
@@ -126,8 +173,15 @@ private struct MarkdownWebView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(onFailure: onFailure) }
 
+    static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
+        view.navigationDelegate = nil
+        view.stopLoading()
+    }
+
     final class Coordinator: NSObject, WKNavigationDelegate {
         var lastHTML: String?
+        var lastBaseURL: URL?
+        var navigation: WKNavigation?
         var position = CGPoint.zero
         var zoomScale: CGFloat = 1
         let onFailure: (String) -> Void
@@ -135,13 +189,16 @@ private struct MarkdownWebView: UIViewRepresentable {
         init(onFailure: @escaping (String) -> Void) { self.onFailure = onFailure }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard navigation === self.navigation else { return }
             webView.scrollView.setZoomScale(zoomScale, animated: false)
             let maximum = max(0, webView.scrollView.contentSize.height - webView.scrollView.bounds.height)
             webView.scrollView.setContentOffset(CGPoint(x: position.x, y: min(position.y, maximum)), animated: false)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
-            guard (error as NSError).code != NSURLErrorCancelled else { return }
+            guard navigation === self.navigation else { return }
+            let failure = error as NSError
+            if failure.domain == NSURLErrorDomain, failure.code == NSURLErrorCancelled { return }
             onFailure("Couldn't render preview: " + error.localizedDescription)
         }
 
@@ -155,11 +212,26 @@ private struct MarkdownWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: WKWebView, context: Context) {
-        guard html != context.coordinator.lastHTML else { return }
+        guard html != context.coordinator.lastHTML || baseURL != context.coordinator.lastBaseURL else { return }
+        context.coordinator.lastBaseURL = baseURL
         context.coordinator.lastHTML = html
         context.coordinator.position = view.scrollView.contentOffset
         context.coordinator.zoomScale = view.scrollView.zoomScale
-        view.loadHTMLString(html, baseURL: nil)
+        context.coordinator.navigation = view.loadHTMLString(html, baseURL: baseURL)
+    }
+}
+
+enum PreviewFormat: String, CaseIterable, Identifiable, Sendable {
+    case automatic = "Automatic"
+    case markdown = "Markdown"
+    case html = "HTML"
+
+    var id: String { rawValue }
+
+    func html(for source: String, title: String, url: URL?) -> String {
+        let isHTML = self == .html || (self == .automatic &&
+            ["html", "htm", "xhtml"].contains(url?.pathExtension.lowercased() ?? ""))
+        return isHTML ? source : MarkdownRenderer.html(for: source, title: title)
     }
 }
 
@@ -251,7 +323,7 @@ enum MarkdownRenderer {
 enum SwiftMarkdown {
 
     static func render(_ source: String) -> String {
-        var parser = Parser(lines: OutlineBuilder.lines(in: source))
+        var parser = Parser(lines: TextMetrics.lines(in: source))
         parser.parse()
         return parser.html
     }
@@ -306,7 +378,7 @@ enum SwiftMarkdown {
                     var collected = defMatch.body
                     // Continuation lines: indented 4+ spaces or tab.
                     var j = i + 1
-                    while j < lines.count {
+                    while j < lines.count, !Task.isCancelled {
                         let next = lines[j]
                         if next.hasPrefix("    ") || next.hasPrefix("\t") {
                             let trimmed = next.drop(while: { $0 == " " || $0 == "\t" })

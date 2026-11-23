@@ -1036,3 +1036,92 @@ final class HomeScreenOpenTabsUITests: XCTestCase {
         return springboard
     }
 }
+
+@MainActor
+final class PreviewPaneUITests: XCTestCase {
+    func test_previewPresentationCanBeClosed() {
+        let app = XCUIApplication()
+        app.launch()
+        defer { app.terminate() }
+        let newTab = app.buttons["New Tab"]
+        if newTab.waitForExistence(timeout: 3) { newTab.tap() }
+        let blank = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Blank Document")).firstMatch
+        if blank.waitForExistence(timeout: 2) { blank.tap() }
+        XCTAssertTrue(app.scrollViews["Text Editor"].waitForExistence(timeout: 5))
+        app.buttons["command-palette"].firstMatch.tap()
+        let search = app.textFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("Toggle HTML / Markdown Preview")
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Toggle HTML / Markdown Preview")).firstMatch.tap()
+        let close = app.buttons["Close Preview"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(app.scrollViews["Text Editor"].isHittable)
+        } else {
+            XCTAssertTrue(app.popovers.firstMatch.exists)
+        }
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5))
+        close.tap()
+        XCTAssertFalse(close.exists)
+        XCTAssertTrue(app.scrollViews["Text Editor"].isHittable)
+    }
+}
+
+@MainActor
+final class MultiFileSearchUITests: XCTestCase {
+    func test_queryReplaceUsesTheMatchTheAlertPresented() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone, "Uses the in-editor search sheet")
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        defer { app.terminate() }
+
+        let newTab = app.buttons["New Tab"]
+        if newTab.waitForExistence(timeout: 3) { newTab.tap() }
+        let blank = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Blank Document")).firstMatch
+        if blank.waitForExistence(timeout: 2) { blank.tap() }
+        let editor = app.scrollViews["Text Editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        editor.typeText("cat cat")
+
+        let palette = app.buttons["command-palette"].firstMatch
+        XCTAssertTrue(palette.waitForExistence(timeout: 5))
+        palette.tap()
+        let paletteSearch = app.textFields.firstMatch
+        XCTAssertTrue(paletteSearch.waitForExistence(timeout: 5))
+        paletteSearch.tap()
+        paletteSearch.typeText("Multi-File Search")
+        let command = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Multi-File Search…")).firstMatch
+        XCTAssertTrue(command.waitForExistence(timeout: 5))
+        command.tap()
+
+        let tabsScope = app.buttons["Open Tabs"]
+        XCTAssertTrue(tabsScope.waitForExistence(timeout: 5))
+        tabsScope.tap()
+        let find = app.textFields["Find"]
+        find.tap()
+        find.typeText("cat")
+        let replace = app.textFields["Replace with (optional)"]
+        replace.tap()
+        replace.typeText("dog")
+        let search = app.buttons["Search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        let query = app.buttons["Query"]
+        XCTAssertTrue(query.waitForExistence(timeout: 5))
+        query.tap()
+
+        let first = app.alerts["Replace match 1 of 2?"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        first.buttons["Skip"].tap()
+        let second = app.alerts["Replace match 2 of 2?"]
+        XCTAssertTrue(second.waitForExistence(timeout: 5))
+        second.buttons["Replace"].tap()
+        XCTAssertTrue(app.staticTexts["Query mode finished."].waitForExistence(timeout: 5))
+        app.navigationBars["Multi-File Search"].buttons["Done"].tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertEqual(editor.value as? String, "cat dog")
+    }
+}

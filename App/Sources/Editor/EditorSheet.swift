@@ -28,10 +28,6 @@ enum EditorSheet: Identifiable {
     case canonize
     case characterPanel
     case markdownTable
-    /// iPhone fallback — iPad opens a real scene via `openWindow`;
-    /// iPhone is single-window so this sheet is the only way the
-    /// preview actually appears.
-    case markdownPreview
     case organizeFootnotes
     /// Word-style walk-through: shows the next misspelled word with
     /// suggestions, lets the user Change / Ignore / Learn one at a
@@ -65,7 +61,6 @@ enum EditorSheet: Identifiable {
         case .canonize:              return "canonize"
         case .characterPanel:        return "characterPanel"
         case .markdownTable:         return "markdownTable"
-        case .markdownPreview:       return "markdownPreview"
         case .organizeFootnotes:     return "organizeFootnotes"
         case .spellCheck:            return "spellCheck"
         }

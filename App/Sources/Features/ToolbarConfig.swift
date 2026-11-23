@@ -2,7 +2,7 @@ import SwiftUI
 
 enum EditorChrome {
     static let commandPaletteTitle = "Command Palette"
-    static let commandPaletteSymbol = "terminal"
+    static let commandPaletteSymbol = "command"
     static let toolMenuTitle = "Tool Menu"
     static var toolItemsTitle: String { DeviceIdiom.isPhone ? "Tool Menu Items" : "Toolbar Items" }
 }

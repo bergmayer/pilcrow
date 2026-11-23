@@ -24,8 +24,8 @@ final class EditorState {
     /// ⓘ share one source of truth.
     var inspectorOpen: Bool = false
     var inspectorTab: InfoInspectorSheet.Tab = .file
-    /// Two views over the SAME document — per-pane cursor/scroll, but
-    /// writes flow back to the shared `PlainTextDocument`.
+    var previewOpen: Bool = false
+    /// Split panes write to one document and keep separate viewports.
     var splitOpen: Bool = false
     var splitOrientation: SplitOrientation = .horizontal
     var splitFraction: CGFloat = 0.5
@@ -85,13 +85,6 @@ final class EditorState {
     var positionHistory = PositionHistory()
 
     weak var textView: PilcrowTextView?
-
-    /// The loading-overlay Cancel button cancels this; the Task
-    /// clears it in its `defer`.
-    var loadTask: Task<Void, Never>?
-    /// Distinguishes a superseding load from the cancelled task it replaced;
-    /// the older task must not clear the newer task's handle in `defer`.
-    var loadGeneration: UInt64 = 0
 
     /// One pending checkpoint per tab. Further edits update the live
     /// buffer without postponing the checkpoint.
@@ -221,9 +214,6 @@ final class EditorState {
         get { prefs.pageGuideColumn }
         set { prefs.pageGuideColumn = newValue }
     }
-    /// Off by default — the per-line diff is cheap but caretRect
-    /// lookups grow with line count, and `Timing
-    /// .changeHistoryGutterByteLimit` short-circuits past the ceiling.
     var showChangeHistoryGutter: Bool {
         get { prefs.showChangeHistoryGutter }
         set { prefs.showChangeHistoryGutter = newValue }

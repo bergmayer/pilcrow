@@ -85,14 +85,8 @@ enum OutlineDiscovery {
 /// Shared heading and fence rules for navigation, folding, and preview.
 /// Rows match the editor's LF, CR, and CRLF line model.
 enum OutlineBuilder {
-    static func lines(in text: String) -> [String] {
-        text.split(omittingEmptySubsequences: false, whereSeparator: {
-            $0 == "\n" || $0 == "\r" || $0 == "\r\n"
-        }).map(String.init)
-    }
-
     static func build(in text: NSString) -> [OutlineEntry] {
-        let lines = lines(in: text as String)
+        let lines = TextMetrics.lines(in: text as String)
         var entries: [OutlineEntry] = []
         var fence: Fence?
         var row = 0

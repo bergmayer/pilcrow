@@ -606,6 +606,8 @@ enum SessionRestore {
 
     static func apply(_ record: SessionRecord, to session: EditorSession, append: Bool = false) {
         guard !record.tabs.isEmpty else { return }
+        let drafts = record.tabs.contains { $0.recoveryFilename != nil }
+            ? DraftsStore.shared.loadAll() : []
         var restored: [TabModel] = []
         for snapshot in record.tabs {
             let tab = TabModel()
@@ -614,7 +616,7 @@ enum SessionRestore {
             // nothing left to load, recovery remains available from
             // the file browser rather than intercepting this tab.
             tab.kind = .editor
-            _ = populate(tab, from: snapshot, in: session)
+            populate(tab, from: snapshot, drafts: drafts, in: session)
             restored.append(tab)
         }
         if append { session.tabs += restored }
@@ -623,12 +625,10 @@ enum SessionRestore {
         session.selectedTabID = restored[idx].id
     }
 
-    /// Returns `true` when something was actually loaded — a resolvable
-    /// fileBookmark or a draft file present on disk. `false` means the
-    /// caller should leave the tab as a fresh blank editor.
-    @discardableResult
-    private static func populate(_ tab: TabModel, from snapshot: TabSnapshot, in session: EditorSession) -> Bool {
-        let draft = DraftsStore.shared.loadAll().first {
+    private static func populate(
+        _ tab: TabModel, from snapshot: TabSnapshot, drafts: [DraftRecord], in session: EditorSession
+    ) {
+        let draft = drafts.first {
             $0.recoveryFilename == snapshot.recoveryFilename
                 || $0.url.lastPathComponent == snapshot.scratchFilename
         }
@@ -636,26 +636,15 @@ enum SessionRestore {
             DraftsStore.shared.existingRecoveryURL(named: $0)
         }
         let resolvedSource = snapshot.fileBookmark.flatMap(resolveBookmark)
-        guard snapshot.recoveryFilename != nil || resolvedSource != nil else { return false }
+        guard snapshot.recoveryFilename != nil || resolvedSource != nil else { return }
 
-        let state = tab.state
-        let document = tab.document
-        let seedRevision = document.bufferRevision
-        state.loadTask?.cancel()
-        state.loadGeneration &+= 1
-        let generation = state.loadGeneration
-        document.isLoading = true
-        state.loadTask = Task { @MainActor [weak tab, weak session] in
+        let seedRevision = tab.document.bufferRevision
+        tab.document.startLoad(onFinish: { [weak session] in
+            session?.persistRestorationRecord()
+        }) { [weak tab] _ in
             guard let tab else { return }
             let state = tab.state
             let document = tab.document
-            defer {
-                if state.loadGeneration == generation {
-                    state.loadTask = nil
-                    document.isLoading = false
-                    session?.persistRestorationRecord()
-                }
-            }
 
             async let draftRead = loadDraft(draft, fallbackURL: draftURL, allowEmpty: snapshot.fileBookmark != nil)
             async let sourceRead = loadSource(resolvedSource)
@@ -689,7 +678,6 @@ enum SessionRestore {
                 originalDraftURL: draftURL
             )
         }
-        return true
     }
 
     /// Returns nil only for cancellation. Ordinary read failures are data:

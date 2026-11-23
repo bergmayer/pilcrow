@@ -30,10 +30,11 @@ struct MultiFileSearchSheet: View {
     @MainActor
     @Observable
     fileprivate final class Model {
-        enum Activity {
+        enum Operation { case search, replacement }
+
+        private enum Activity {
             case idle
-            case searching
-            case replacing
+            case running(Operation, Task<Void, Never>)
         }
 
         enum Prompt {
@@ -51,14 +52,14 @@ struct MultiFileSearchSheet: View {
         var folder: URL?
         var pickingFolder = false
         var extensionFilter = "swift,m,h,c,cpp,js,ts,tsx,py,rb,go,rs,java,kt,html,css,xml,json,yaml,yml,md,txt"
-        var searchTask: Task<Void, Never>?
-        var searchGeneration = UUID()
+        private var activity: Activity = .idle
+        private(set) var searchGeneration = UUID()
         var searchedContext: FindContext?
         var fingerprints: [ResultGroupKey: Data] = [:]
-        var activity: Activity = .idle
-        var sourcesScanned = 0
-        var results: [SearchResult] = []
-        var groups: [ResultGroup] = []
+        var results: [SearchResult] = [] {
+            didSet { groups = MultiFileSearchSheet.group(results) }
+        }
+        private(set) var groups: [ResultGroup] = []
         var errorText: String?
         var seenFirstAppear = false
         var currentResultIndex = -1
@@ -66,9 +67,29 @@ struct MultiFileSearchSheet: View {
         var queryOffsetDeltas: [ResultGroupKey: Int] = [:]
         var replaceSummary: String?
 
-        var isSearching: Bool {
-            get { activity == .searching }
-            set { activity = newValue ? .searching : .idle }
+        var operation: Operation? {
+            if case .running(let operation, _) = activity { return operation }
+            return nil
+        }
+
+        func start(_ operation: Operation, work: @escaping @MainActor () async -> Void) {
+            guard case .idle = activity else { return }
+            let generation = searchGeneration
+            activity = .running(operation, Task { @MainActor [weak self] in
+                await work()
+                guard let self, searchGeneration == generation else { return }
+                activity = .idle
+            })
+        }
+
+        func cancel() {
+            if case .running(_, let task) = activity { task.cancel() }
+        }
+
+        func invalidate() {
+            cancel()
+            searchGeneration = UUID()
+            activity = .idle
         }
 
         var pendingReplaceAllConfirm: Bool {
@@ -120,11 +141,9 @@ struct MultiFileSearchSheet: View {
     private var folder: URL? { get { model.folder } nonmutating set { model.folder = newValue } }
     private var pickingFolder: Bool { get { model.pickingFolder } nonmutating set { model.pickingFolder = newValue } }
     private var extensionFilter: String { get { model.extensionFilter } nonmutating set { model.extensionFilter = newValue } }
-    private var searchTask: Task<Void, Never>? { get { model.searchTask } nonmutating set { model.searchTask = newValue } }
-    private var isSearching: Bool { get { model.isSearching } nonmutating set { model.isSearching = newValue } }
-    private var sourcesScanned: Int { get { model.sourcesScanned } nonmutating set { model.sourcesScanned = newValue } }
+    private var isSearching: Bool { model.operation == .search }
     private var results: [SearchResult] { get { model.results } nonmutating set { model.results = newValue } }
-    private var groups: [ResultGroup] { get { model.groups } nonmutating set { model.groups = newValue } }
+    private var groups: [ResultGroup] { model.groups }
     private var errorText: String? { get { model.errorText } nonmutating set { model.errorText = newValue } }
     private var seenFirstAppear: Bool { get { model.seenFirstAppear } nonmutating set { model.seenFirstAppear = newValue } }
     private var currentResultIndex: Int { get { model.currentResultIndex } nonmutating set { model.currentResultIndex = newValue } }
@@ -145,13 +164,13 @@ struct MultiFileSearchSheet: View {
                 controlsSection
                 resultsSection
             }
-            .disabled(model.activity == .replacing)
+            .disabled(model.operation == .replacement)
             .navigationTitle("Multi-File Search")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") {
-                        searchTask?.cancel()
+                        model.cancel()
                         close()
                     }
                 }
@@ -179,7 +198,7 @@ struct MultiFileSearchSheet: View {
                     }
                 }
             }
-            .onDisappear { searchTask?.cancel() }
+            .onDisappear { model.cancel() }
             .alert(
                 "Replace in all \(uniqueSourceCount) source\(uniqueSourceCount == 1 ? "" : "s")?",
                 isPresented: Binding(
@@ -195,33 +214,36 @@ struct MultiFileSearchSheet: View {
             .alert(
                 queryAlertTitle,
                 isPresented: queryAlertBinding,
-                presenting: currentQueryResult
-            ) { _ in
-                Button("Skip") { queryAdvance() }
-                Button("Replace") { runReplacement { await queryReplaceAndAdvance() } }
-                Button("Replace All Remaining", role: .destructive) { runReplacement { await replaceMatches(Array(results.dropFirst(queryCursor ?? results.count))) } }
+                presenting: queryStep
+            ) { step in
+                Button("Skip") { runReplacement { queryAdvance(after: step.index) } }
+                Button("Replace") { runReplacement { await queryReplaceAndAdvance(step) } }
+                Button("Replace All Remaining", role: .destructive) {
+                    let remaining = Array(results.dropFirst(step.index))
+                    runReplacement { await replaceMatches(remaining) }
+                }
                 Button("Cancel", role: .cancel) { queryCursor = nil }
-            } message: { match in
-                Text("\(match.groupLabel) line \(match.line):\n\(match.preview)")
+            } message: { step in
+                Text("\(step.match.groupLabel) line \(step.match.line):\n\(step.match.preview)")
             }
         }
     }
 
     private var queryAlertTitle: String {
-        guard let cursor = queryCursor, results.indices.contains(cursor) else { return "" }
-        return "Replace match \(cursor + 1) of \(results.count)?"
+        guard let step = queryStep else { return "" }
+        return "Replace match \(step.index + 1) of \(results.count)?"
     }
 
     private var queryAlertBinding: Binding<Bool> {
         Binding(
-            get: { queryCursor != nil && (queryCursor.map { results.indices.contains($0) } ?? false) },
+            get: { queryStep != nil },
             set: { newValue in if !newValue { queryCursor = nil } }
         )
     }
 
-    private var currentQueryResult: SearchResult? {
+    private var queryStep: (index: Int, match: SearchResult)? {
         guard let cursor = queryCursor, results.indices.contains(cursor) else { return nil }
-        return results[cursor]
+        return (cursor, results[cursor])
     }
 
     private var uniqueSourceCount: Int {
@@ -320,11 +342,9 @@ struct MultiFileSearchSheet: View {
         Section {
             if isSearching {
                 HStack {
-                    ProgressView()
-                    Text("Scanned \(sourcesScanned), \(results.count) match\(results.count == 1 ? "" : "es")…")
-                        .foregroundStyle(.secondary)
+                    ProgressView("Searching…")
                     Spacer()
-                    Button("Stop") { searchTask?.cancel() }
+                    Button("Stop") { model.cancel() }
                 }
             } else {
                 Button {
@@ -368,7 +388,7 @@ struct MultiFileSearchSheet: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(replacementContext == nil || model.activity != .idle)
+                    .disabled(replacementContext == nil || model.operation != nil)
                     Button(role: .destructive) {
                         pendingReplaceAllConfirm = true
                     } label: {
@@ -376,7 +396,7 @@ struct MultiFileSearchSheet: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(replacementContext == nil || model.activity != .idle)
+                    .disabled(replacementContext == nil || model.operation != nil)
                 }
             }
             if let replaceSummary {
@@ -438,7 +458,7 @@ struct MultiFileSearchSheet: View {
                     }
                 }
             }
-        } else if !isSearching && sourcesScanned > 0 {
+        } else if model.searchedContext != nil && replaceSummary == nil && errorText == nil {
             Section { Text("No matches.").foregroundStyle(.secondary) }
         }
     }
@@ -500,15 +520,10 @@ struct MultiFileSearchSheet: View {
     }
 
     private func invalidateSearch() {
-        searchTask?.cancel()
-        searchTask = nil
-        model.searchGeneration = UUID()
-        model.activity = .idle
+        model.invalidate()
         model.searchedContext = nil
         model.fingerprints = [:]
         results = []
-        groups = []
-        sourcesScanned = 0
         currentResultIndex = -1
         queryCursor = nil
         queryOffsetDeltas = [:]
@@ -517,17 +532,9 @@ struct MultiFileSearchSheet: View {
     }
 
     private func startSearch() {
-        searchTask?.cancel()
-        let generation = UUID()
-        model.searchGeneration = generation
-        model.fingerprints = [:]
-        model.searchedContext = nil
-        errorText = nil
-        results = []
-        groups = []
-        sourcesScanned = 0
-        currentResultIndex = -1
-        isSearching = true
+        guard canStartSearch, model.operation == nil else { return }
+        invalidateSearch()
+        let generation = model.searchGeneration
 
         let ctx = model.context
         bus.find.context = ctx
@@ -548,13 +555,7 @@ struct MultiFileSearchSheet: View {
         case .windows: inMemorySources = SearchEngine.windowsSources()
         }
 
-        searchTask = Task { @MainActor in
-            defer {
-                if model.searchGeneration == generation {
-                    isSearching = false
-                    searchTask = nil
-                }
-            }
+        model.start(.search) {
             do {
                 let matcher = try SearchEngine.compileMatcher(for: ctx)
                 let worker: Task<SearchEngine.SearchOutput, any Error>
@@ -584,7 +585,6 @@ struct MultiFileSearchSheet: View {
                 model.searchedContext = ctx
                 model.fingerprints = output.fingerprints
                 results = output.results
-                sourcesScanned = output.sourcesScanned
                 errorText = output.issues.isEmpty ? nil : output.issues.joined(separator: "\n")
             } catch is CancellationError {
                 // Stop button.
@@ -592,8 +592,6 @@ struct MultiFileSearchSheet: View {
                 guard !Task.isCancelled, model.searchGeneration == generation else { return }
                 errorText = error.localizedDescription
             }
-            guard model.searchGeneration == generation else { return }
-            groups = Self.group(results)
         }
     }
 
@@ -618,43 +616,69 @@ struct MultiFileSearchSheet: View {
     nonisolated static func runFolderSearch(
         folder: URL,
         matcher: Matcher,
-        extensions: Set<String>
+        extensions: Set<String>,
+        read: @escaping @Sendable (URL) async throws -> (text: String, fingerprint: Data) = readText
     ) async throws -> SearchOutput {
         let scoped = folder.startAccessingSecurityScopedResource()
         defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
 
-        let urls = try Self.collectFiles(in: folder, extensions: extensions)
-        try Task.checkCancellation()
-
+        let urls = try collectFiles(in: folder, extensions: extensions)
         var output = SearchOutput(results: [], sourcesScanned: 0)
         var skipped = 0
-        for url in urls {
+        // Bound provider requests and decoded buffers. Consume each batch in
+        // path order so the result cap and skipped-file details stay stable.
+        let readLimit = 4
+        for start in stride(from: 0, to: urls.count, by: readLimit) {
             try Task.checkCancellation()
-            if output.results.count >= Self.maxResults { break }
-            output.sourcesScanned += 1
-            let source: (text: String, fingerprint: Data)
-            do {
-                source = try await Self.readText(at: url)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                skipped += 1
-                if output.issues.count < 20 { output.issues.append("\(url.lastPathComponent): \(error.localizedDescription)") }
-                continue
+            if output.results.count == maxResults { break }
+            let batch = urls[start..<min(start + readLimit, urls.count)]
+            let reads = try await withThrowingTaskGroup(
+                of: (Int, Result<(text: String, fingerprint: Data), any Error>).self
+            ) { group in
+                for index in batch.indices {
+                    let url = batch[index]
+                    group.addTask {
+                        do {
+                            try Task.checkCancellation()
+                            return (index, .success(try await read(url)))
+                        } catch {
+                            try Task.checkCancellation()
+                            if error is CancellationError { throw error }
+                            return (index, .failure(error))
+                        }
+                    }
+                }
+                var completed: [(Int, Result<(text: String, fingerprint: Data), any Error>)] = []
+                for try await result in group { completed.append(result) }
+                return completed.sorted { $0.0 < $1.0 }
             }
-            let text = source.text
-            let groupKey = ResultGroupKey.url(url)
-            let groupLabel = url.lastPathComponent
-            let hits = matcher.matches(
-                in: text,
-                groupKey: groupKey,
-                groupLabel: groupLabel,
-                fileURL: url,
-                limit: Self.maxResults - output.results.count
-            )
-            output.results.append(contentsOf: hits)
-            if !hits.isEmpty { output.fingerprints[groupKey] = source.fingerprint }
+
+            for (index, read) in reads {
+                try Task.checkCancellation()
+                if output.results.count == maxResults { break }
+                let url = batch[index]
+                output.sourcesScanned += 1
+                switch read {
+                case .success(let source):
+                    let key = ResultGroupKey.url(url)
+                    let hits = matcher.matches(
+                        in: source.text,
+                        groupKey: key,
+                        groupLabel: url.lastPathComponent,
+                        fileURL: url,
+                        limit: maxResults - output.results.count
+                    )
+                    output.results.append(contentsOf: hits)
+                    if !hits.isEmpty { output.fingerprints[key] = source.fingerprint }
+                case .failure(let error):
+                    skipped += 1
+                    if output.issues.count < 20 {
+                        output.issues.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                    }
+                }
+            }
         }
+        try Task.checkCancellation()
         if skipped > 0 { output.issues.insert("Skipped \(skipped) files. Details for up to 20 files follow.", at: 0) }
         if output.results.count == maxResults { output.issues.append("Results limited to 10,000 matches. Narrow the search to see more.") }
         return output
@@ -667,8 +691,8 @@ struct MultiFileSearchSheet: View {
         var output = SearchOutput(results: [], sourcesScanned: 0)
         for source in sources {
             try Task.checkCancellation()
+            if output.results.count == maxResults { break }
             output.sourcesScanned += 1
-            if output.results.count >= Self.maxResults { break }
             let hits = matcher.matches(
                 in: source.text,
                 groupKey: source.groupKey,
@@ -679,6 +703,7 @@ struct MultiFileSearchSheet: View {
             output.results.append(contentsOf: hits)
             if !hits.isEmpty { output.fingerprints[source.groupKey] = fingerprint(Data(source.text.utf8)) }
         }
+        try Task.checkCancellation()
         if output.results.count == maxResults { output.issues.append("Results limited to 10,000 matches. Narrow the search to see more.") }
         return output
     }
@@ -802,9 +827,9 @@ struct MultiFileSearchSheet: View {
                 }
             } else if let literal {
                 var searchStart = 0
+                let opts: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
                 while searchStart < ns.length, !Task.isCancelled {
                     let searchRange = NSRange(location: searchStart, length: ns.length - searchStart)
-                    let opts: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
                     let found = ns.range(of: literal, options: opts, range: searchRange)
                     if found.location == NSNotFound { break }
                     out.append(makeResult(at: found, ns: ns, cursor: &cursor,
@@ -848,9 +873,7 @@ struct MultiFileSearchSheet: View {
         ) -> SearchResult {
             let line = cursor.line(at: range.location, in: ns)
             let lineRange = ns.lineRange(for: NSRange(location: range.location, length: 0))
-            var preview = ns.substring(with: lineRange)
-            if let last = preview.last, last == "\n" || last == "\r" { preview.removeLast() }
-            preview = preview.trimmingCharacters(in: .whitespaces)
+            let preview = Self.preview(of: lineRange, near: range.location, in: ns)
             return SearchResult(
                 groupKey: groupKey,
                 groupLabel: groupLabel,
@@ -859,6 +882,21 @@ struct MultiFileSearchSheet: View {
                 preview: preview,
                 range: range
             )
+        }
+
+        private static func preview(of line: NSRange, near location: Int, in text: NSString) -> String {
+            let snippetLength = 240
+            if line.length <= snippetLength {
+                var body = text.substring(with: line)
+                if let last = body.last, last == "\n" || last == "\r" || last == "\r\n" { body.removeLast() }
+                return body.trimmingCharacters(in: .whitespaces)
+            }
+            let end = NSMaxRange(line)
+            let start = max(line.location, min(location - 40, end - snippetLength))
+            let length = min(snippetLength, end - start)
+            let selection = text.rangeOfComposedCharacterSequences(for: NSRange(location: start, length: length))
+            let body = text.substring(with: selection).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (selection.location > line.location ? "…" : "") + body + (NSMaxRange(selection) < end ? "…" : "")
         }
     }
 
@@ -971,15 +1009,7 @@ struct MultiFileSearchSheet: View {
     }
 
     private func runReplacement(_ operation: @escaping @MainActor () async -> Void) {
-        guard model.activity == .idle else { return }
-        let generation = model.searchGeneration
-        model.activity = .replacing
-        searchTask = Task { @MainActor in
-            await operation()
-            guard model.searchGeneration == generation else { return }
-            model.activity = .idle
-            searchTask = nil
-        }
+        model.start(.replacement, work: operation)
     }
 
     /// All bulk modes consume the same displayed ranges and source versions.
@@ -1013,7 +1043,6 @@ struct MultiFileSearchSheet: View {
         }
         queryCursor = nil
         results = []
-        groups = []
         currentResultIndex = -1
     }
 
@@ -1024,24 +1053,22 @@ struct MultiFileSearchSheet: View {
         queryCursor = 0
     }
 
-    private func queryAdvance() {
-        guard let cursor = queryCursor else { return }
-        let next = cursor + 1
+    private func queryAdvance(after index: Int) {
+        let next = index + 1
         if next < results.count {
             queryCursor = next
         } else {
             queryCursor = nil
             results = []
-            groups = []
             currentResultIndex = -1
             replaceSummary = "Query mode finished."
         }
     }
 
-    private func queryReplaceAndAdvance() async {
-        guard let cursor = queryCursor, results.indices.contains(cursor), let ctx = replacementContext else { return }
+    private func queryReplaceAndAdvance(_ step: (index: Int, match: SearchResult)) async {
+        guard let ctx = replacementContext else { return }
         let generation = model.searchGeneration
-        let target = results[cursor]
+        let target = step.match
         do {
             let range = NSRange(location: target.range.location + queryOffsetDeltas[target.groupKey, default: 0], length: target.range.length)
             let outcome = try await replacementEngine.applyReplacement(in: target.groupKey,
@@ -1050,7 +1077,7 @@ struct MultiFileSearchSheet: View {
             guard model.searchGeneration == generation else { return }
             queryOffsetDeltas[target.groupKey, default: 0] += outcome.utf16Delta
             model.fingerprints[target.groupKey] = outcome.fingerprint
-            queryAdvance()
+            if !Task.isCancelled { queryAdvance(after: step.index) }
         } catch {
             guard model.searchGeneration == generation else { return }
             errorText = error.localizedDescription

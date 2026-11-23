@@ -137,9 +137,7 @@ final class EditorSession {
         }
         // Detached tabs keep their work; closed tabs must not publish a
         // late load or recreate a recovery shadow after Discard.
-        tab.state.loadTask?.cancel()
-        tab.state.loadTask = nil
-        tab.state.loadGeneration &+= 1
+        tab.document.invalidateLoad()
         tab.state.transformTask?.cancel()
         tab.secondaryState?.transformTask?.cancel()
         tab.state.autoSaveTask?.cancel()
@@ -200,10 +198,7 @@ final class EditorSession {
         isClosingWindow = true
         SessionsStore.shared.remove(forScene: sceneUUID)
         for tab in tabs {
-            tab.state.loadTask?.cancel()
-            tab.state.loadTask = nil
-            tab.state.loadGeneration &+= 1
-            tab.document.isLoading = false
+            tab.document.invalidateLoad()
             tab.state.transformTask?.cancel()
             tab.secondaryState?.transformTask?.cancel()
             tab.state.autoSaveTask?.cancel()

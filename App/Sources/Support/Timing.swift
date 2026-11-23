@@ -24,21 +24,10 @@ enum Timing {
     /// Delay from the first uncheckpointed edit. Further typing must
     /// not reset this timer and indefinitely postpone crash recovery.
     static let autoSaveInterval: Duration = .milliseconds(800)
-    /// Debounce window before the change-history gutter overlay
-    /// re-splits the buffer to recompute its colored bars. Per-
-    /// keystroke splits froze typing on multi-MB files; debouncing
-    /// trades a beat of bar-update lag for snappy editing.
-    static let changeHistoryOverlayDebounce: Duration = .milliseconds(300)
-    /// Hard byte ceiling above which the change-history gutter
-    /// overlay refuses to render — even when the per-window
-    /// preference is on. Splitting both buffer + baseline by `\n`,
-    /// walking the line manager via `caretRect(at:)` for every
-    /// changed line, and laying out the bars all scale with line
-    /// count, so on multi-hundred-KB sources the user can perceive
-    /// the lag after each keystroke pause. 250 KB stays comfortably
-    /// instant for prose and source files (≈4-6 k lines) while
-    /// skipping novels and large logs entirely.
-    static let changeHistoryGutterByteLimit: Int = 250 * 1024
+    /// Coalesces native edits before publishing the buffer to SwiftUI.
+    static let bufferSnapshotDebounce: Duration = .milliseconds(300)
+    /// UTF-16 length ceiling for either side of the change-history comparison.
+    static let changeHistoryGutterLengthLimit = 250 * 1024
     /// Brief yield before applying the post-load text so SwiftUI
     /// can paint the loading overlay first.
     static let loadOverlayHandoff: Duration = .milliseconds(100)

@@ -36,7 +36,6 @@ final class SceneRouter {
     /// which can't be reached outside a View body.
     var openWindow: ((SceneID) -> Void)?
     var openEditorWindow: ((EditorRoute) -> Void)?
-    var openPreviewWindow: ((UUID) -> Void)?
 
     var pendingShortcut: HomeShortcut?
     var hasAppliedLaunchBehavior = false
